@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Screen Capture</title>
+    <link rel="stylesheet" href="screen-capture-styles.css">
+</head>
+<body>
+    <div id="panel-area">
+        <div id="panel">
+            <!-- Buttons will be dynamically added here -->
+        </div>
+    </div>
+    <div id="error-container"></div>
+    <canvas id="screen"></canvas>
+    <div id="debug"></div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <script>
+        const canvas = document.getElementById('screen');
+        const ctx = canvas.getContext('2d');
+        const panel = document.getElementById('panel');
+        const debug = document.getElementById('debug');
+        const errorContainer = document.getElementById('error-container');
+        const ws = new WebSocket('ws://localhost:3000/ws');
+        ws.binaryType = 'arraybuffer';
+
+        function log(message) {
+            console.log(message);
+            debug.innerHTML += message + '<br>';
+            debug.scrollTop = debug.scrollHeight;
+        }
+
+        function showError(message) {
+            errorContainer.innerHTML = `<div class="error-message">${message}</div>`;
+        }
+
+        let imgObj = new Image();
+        imgObj.onload = function() {
+            canvas.width = imgObj.width;
+            canvas.height = imgObj.height;
+            ctx.drawImage(imgObj, 0, 0);
+            //log('Image loaded: ' + imgObj.width + 'x' + imgObj.height);
+        };
+
+        imgObj.onerror = function(error) {
+            log('Error loading image: ' + error.message);
+        };
+
+        let currentDisplay = 0;
+
+        ws.onopen = () => {
+            log('WebSocket connected');
+            // Request display count when connected
+            ws.send(JSON.stringify({ type: 'requestDisplayCount' }));
+        };
+
+        ws.onclose = () => {
+            log('WebSocket disconnected');
+        };
+
+        ws.onerror = (error) => {
+            log('WebSocket error: ' + error.message);
+        };
+
+        ws.onmessage = (event) => {
+            if (!(event.data instanceof ArrayBuffer))
+                log('Received message type: ' + typeof event.data);
+            if (typeof event.data === 'string') {
+                log('Received string message: ' + event.data);
+                try {
+                    const data = JSON.parse(event.data);
+                    log('Parsed JSON: ' + JSON.stringify(data));
+                    if (data.type === 'displayCount') {
+                        log('Display count received: ' + data.count);
+                        createButtons(data.count);
+                    } else if (data.type === 'error') {
+                        log('Error received: ' + data.message);
+                        showError(data.message);
+                    } else {
+                        log('Unknown message type: ' + data.type);
+                    }
+                } catch (e) {
+                    log('Error parsing JSON: ' + e.message);
+                }
+            } else if (event.data instanceof ArrayBuffer) {
+                const arrayBuffer = event.data;
+                
+                //log('Received binary data: ' + arrayBuffer.byteLength + ' bytes');
+                
+                // Decompress the data (assuming it's compressed with zlib)
+                const compressed = new Uint8Array(arrayBuffer);
+                try {
+                    // Use pako library for zlib decompression
+                    const decompressed = pako.inflate(compressed);
+                    const blob = new Blob([decompressed], { type: 'image/jpeg' });
+                    const url = URL.createObjectURL(blob);
+                    imgObj.src = url;
+                } catch (error) {
+                    log('Error decompressing data: ' + error.message);
+                }
+            } else {
+                log('Received unknown data type');
+            }
+        };
+
+        function createButtons(count) {
+            log('Creating ' + count + ' buttons');
+            panel.innerHTML = ''; // Clear existing buttons
+            for (let i = 0; i < count; i++) {
+                const button = document.createElement('button');
+                button.className = 'action-button';
+                button.innerHTML = `<span>Monitor ${i + 1}</span>`;
+                button.addEventListener('click', () => selectDisplay(i));
+                panel.appendChild(button);
+                log('Button created for Monitor ' + (i + 1));
+            }
+            log('Total buttons created: ' + panel.children.length);
+            selectDisplay(0); // Select the first display by default
+        }
+
+        function selectDisplay(displayIndex) {
+            log('Selecting display ' + displayIndex);
+            currentDisplay = displayIndex;
+            document.querySelectorAll('.action-button').forEach((btn, index) => {
+                btn.classList.toggle('active', index === displayIndex);
+            });
+            ws.send(JSON.stringify({ type: 'selectDisplay', display: displayIndex }));
+        }
+    </script>
+</body>
+</html>
