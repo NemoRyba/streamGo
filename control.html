@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stream Control</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+ 
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        }
+        .controls {
+            flex: 0 0 30px; /* Thinner control panel */
+            background-color: rgba(0, 0, 0, 0.5);
+            color: red;
+            font-family: 'Courier New', Courier, monospace;
+            padding: 10px;
+            border-bottom: 2px solid red;
+            display: flex;
+            align-items: center;
+            justify-content: center; /* Center controls horizontally */
+        }
+        .controls input {
+            width: 100px; /* Adjusted width for 4 digits */
+            text-align: center;
+            font-size: 18px; /* Slightly smaller font size */
+            margin: 0 10px;
+            background-color: black;
+            color: red;
+            border: none;
+            border-radius: 5px;
+            padding: 5px;
+        }
+        .controls button {
+            font-size: 18px; /* Slightly smaller font size */
+            color: red;
+            background-color: transparent;
+            border: 2px solid red;
+            border-radius: 5px;
+            padding: 5px 10px;
+            cursor: pointer;
+        }
+        .controls button:hover {
+            background-color: red;
+            color: black;
+        }
+        .stream {
+            flex: 1 1 auto;
+            background-color: black;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        #video {
+            max-width: 100%;
+            max-height: 100%;
+            width: auto; /* Maintain aspect ratio */
+            height: auto; /* Maintain aspect ratio */
+            object-fit: contain; /* Scale the image to fit within the container */
+        }
+    </style>
+    
+</head>
+<body>
+    <div class="container">
+        <div class="controls">
+            <button id="decrease10">--</button>
+            <button id="decrease1">-</button>
+            <input type="text" id="duration" value="1">
+            <button id="increase1">+</button>
+            <button id="increase10">++</button>
+        </div>
+        <div class="stream">
+            <img id="video" src="/stream" alt="Stream">
+        </div>
+    </div>
+
+<script>
+    const durationInput = document.getElementById('duration');
+    const increase100Btn = document.getElementById('increase1');
+    const decrease100Btn = document.getElementById('decrease1');
+    const increase1000Btn = document.getElementById('increase10');
+    const decrease1000Btn = document.getElementById('decrease10');
+
+    function updateJpegQuality(value) {
+        console.log(`Updating quality to: ${value}`); // Print the duration value
+        fetch('/', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: `jpegQuality=${value}`
+        });
+    }
+
+    function adjustJpegQuality(amount) {
+        let value = parseInt(durationInput.value)+parseInt(amount);
+        if (!isNaN(value)) {
+            if (value > 100) {
+                value = value - 100;
+            } else if (value < 1) {
+                value = 100 + value;
+            } 
+
+            //value = Math.max(0, Math.min(5040, value + amount));
+            durationInput.value =  parseInt(value);
+            console.log(`Adjusted jpeg quality to: ${value}`); // Print the adjusted duration value
+            updateJpegQuality(value);
+        }
+    }
+
+    increase100Btn.addEventListener('click', () => adjustJpegQuality(1));
+    decrease100Btn.addEventListener('click', () => adjustJpegQuality(-1));
+    increase1000Btn.addEventListener('click', () => adjustJpegQuality(10));
+    decrease1000Btn.addEventListener('click', () => adjustJpegQuality(-10));
+
+    durationInput.addEventListener('input', (e) => {
+        let value = parseFloat(e.target.value);
+        if (isNaN(value) || value < 0 || value > 5040 || !Number.isInteger(value)) {
+            // Correct the input value if it's out of range or invalid
+            if (value > 100) {
+                e.target.value = '100';
+            } else if (value < 1) {
+                e.target.value = '1';
+            } else {
+                e.target.value = e.target.getAttribute('data-previous') || '100';
+            }
+            console.log(`Invalid input. Reverted to: ${e.target.value}`); // Print the reverted value
+        } else {
+            e.target.setAttribute('data-previous', e.target.value);
+            console.log(`Valid input: ${e.target.value}`); // Print the valid input value
+            updateJpegQuality(e.target.value);
+        }
+    });
+
+    // Initialize previous value attribute
+    durationInput.setAttribute('data-previous', durationInput.value);
+</script>
+
+</body>
+</html>
