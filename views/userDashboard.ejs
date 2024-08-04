@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Dashboard</title>
+    <link rel="stylesheet" href="/dashboard.css">
+    <link rel="stylesheet" href="/screen-capture-styles.css">
+    <style>
+        .stream-preview {
+            width: 200px;
+            height: 150px;
+            border: 2px solid #333;
+            margin: 20px;
+            cursor: pointer;
+            overflow: visible;
+            position: relative;
+        }
+        .stream-preview img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        #displayMenu {
+            display: none;
+            position: absolute;
+            background: rgba(0, 0, 0, 0.9);
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 10;
+            min-width: 120px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        #displayMenu button {
+            display: block;
+            width: 100%;
+            padding: 8px 10px;
+            margin: 5px 0;
+            background: none;
+            border: none;
+            color: white;
+            cursor: pointer;
+            text-align: left;
+            transition: background-color 0.3s;
+        }
+        #displayMenu button:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="/logout" class="logout">Logout</a>
+        <h1>Welcome, <%= user.username %>!</h1>
+        <div class="stream-preview" id="streamPreview">
+            <img src="/api/latest-frame" alt="Stream Preview" width="200" height="150">
+            <div id="displayMenu"></div>
+        </div>
+    </div>
+
+    <script>
+        const streamPreview = document.getElementById('streamPreview');
+        const displayMenu = document.getElementById('displayMenu');
+        let displayCount = 0;
+        let fullscreenWindows = {};
+
+        streamPreview.addEventListener('click', (event) => {
+            event.stopPropagation();
+            console.log('Stream preview clicked');
+            const rect = streamPreview.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+            toggleDisplayMenu(x, y);
+        });
+
+        document.addEventListener('click', (event) => {
+            if (!streamPreview.contains(event.target)) {
+                displayMenu.style.display = 'none';
+            }
+        });
+
+        function toggleDisplayMenu(x, y) {
+            if (displayMenu.style.display === 'block') {
+                displayMenu.style.display = 'none';
+            } else {
+                displayMenu.style.display = 'block';
+                displayMenu.style.left = `${x}px`;
+                displayMenu.style.top = `${y}px`;
+                
+                // Ensure the menu doesn't go out of the preview bounds
+                /*const menuRect = displayMenu.getBoundingClientRect();
+                const previewRect = streamPreview.getBoundingClientRect();
+                
+                if (menuRect.right > previewRect.right) {
+                    displayMenu.style.left = `${previewRect.width - menuRect.width}px`;
+                }
+                if (menuRect.bottom > previewRect.bottom) {
+                    displayMenu.style.top = `${previewRect.height - menuRect.height}px`;
+                }
+                */
+                if (displayCount === 0) {
+                    // If we haven't received the display count yet, request it again
+                    socket.send(JSON.stringify({ type: 'requestDisplayCount' }));
+                }
+            }
+        }
+
+        function createDisplayButtons(count) {
+            console.log('Creating display buttons, count:', count);
+            displayMenu.innerHTML = '';
+            for (let i = 0; i < count; i++) {
+                const button = document.createElement('button');
+                button.textContent = `Display ${i + 1}`;
+                button.onclick = () => {
+                    openFullscreen(i);
+                    displayMenu.style.display = 'none';
+                };
+                displayMenu.appendChild(button);
+            }
+        }
+
+        function openFullscreen(display) {
+            console.log('Opening fullscreen for display:', display);
+            if (fullscreenWindows[display]) {
+                if (!fullscreenWindows[display].closed) {
+                    fullscreenWindows[display].focus();
+                    return;
+                }
+            }
+            const windowName = `FullscreenStream_${display}`;
+            fullscreenWindows[display] = window.open(`/fullscreen?display=${display}`, windowName, 'width=800,height=600');
+            
+            // Optional: You can add an event listener to remove the reference when the window is closed
+            fullscreenWindows[display].addEventListener('beforeunload', () => {
+                fullscreenWindows[display] = null;
+            });
+        }
+
+        function updatePreviewImage() {
+            const img = streamPreview.querySelector('img');
+            img.src = `/api/latest-frame?t=${new Date().getTime()}`;
+        }
+
+        const socket = new WebSocket('ws://' + window.location.host + '/ws');
+
+        socket.onopen = function(event) {
+            console.log('WebSocket connection opened');
+            socket.send(JSON.stringify({ type: 'requestDisplayCount' }));
+        };
+
+        socket.onmessage = function(event) {
+            if (typeof event.data === 'string') {
+                try {
+                    const data = JSON.parse(event.data);
+                    console.log('Received data:', data);
+                    if (data.type === 'displayCount') {
+                        displayCount = data.count;
+                        console.log('Display count:', displayCount);
+                        createDisplayButtons(displayCount);
+                    }
+                } catch (error) {
+                    console.error('Error parsing message:', error);
+                }
+            } else if (event.data instanceof Blob) {
+                console.log('Received binary data');
+            }
+        };
+
+        socket.onerror = function(error) {
+            console.error('WebSocket error:', error);
+        };
+
+        socket.onclose = function(event) {
+            console.log('WebSocket connection closed');
+        };
+
+        setInterval(updatePreviewImage, 3000); // Update every 3 seconds
+    </script>
+</body>
+</html>

@@ -59,6 +59,7 @@ func captureAndEncodeFrame(display int) ([]byte, error) {
 
 	return compressBuffer.Bytes(), nil
 }
+
 func sendJSONMessage(conn *websocket.Conn, message interface{}) error {
 	jsonBytes, err := json.Marshal(message)
 	if err != nil {
