@@ -3,11 +3,12 @@ package main
 import (
 	"bytes"
 	"compress/zlib"
-	"encoding/json"
+	"encoding/base64"
 	"image"
 	"image/jpeg"
 	"log"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -25,52 +26,43 @@ const (
 var (
 	captureBuffer  = &bytes.Buffer{}
 	compressBuffer = &bytes.Buffer{}
-	currentDisplay = 0
+	activeDisplays = make(map[int]bool)
+	displayMutex   sync.Mutex
 )
 
-func captureAndEncodeFrame(display int) ([]byte, error) {
-	log.Printf("Capturing frame for display %d", display)
+func captureAndEncodeFrame(display int) (string, error) {
 	img, err := screenshot.CaptureDisplay(display)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	log.Printf("Captured image size: %dx%d", img.Bounds().Dx(), img.Bounds().Dy())
 	if img.Bounds().Dx() > maxWidth {
 		img = resize.Resize(maxWidth, 0, img, resize.Lanczos3).(*image.RGBA)
-		log.Printf("Resized image to %dx%d", img.Bounds().Dx(), img.Bounds().Dy())
 	}
 
 	captureBuffer.Reset()
 	if err := jpeg.Encode(captureBuffer, img, &jpeg.Options{Quality: jpegQuality}); err != nil {
-		return nil, err
+		return "", err
 	}
-	log.Printf("JPEG encoded size: %d bytes", captureBuffer.Len())
 
 	compressBuffer.Reset()
 	zw := zlib.NewWriter(compressBuffer)
 	if _, err := zw.Write(captureBuffer.Bytes()); err != nil {
-		return nil, err
+		return "", err
 	}
 	if err := zw.Close(); err != nil {
-		return nil, err
+		return "", err
 	}
-	log.Printf("Compressed size: %d bytes", compressBuffer.Len())
 
-	return compressBuffer.Bytes(), nil
+	return base64.StdEncoding.EncodeToString(compressBuffer.Bytes()), nil
 }
 
 func sendJSONMessage(conn *websocket.Conn, message interface{}) error {
-	jsonBytes, err := json.Marshal(message)
-	if err != nil {
-		return err
-	}
-	return conn.WriteMessage(websocket.BinaryMessage, jsonBytes)
+	return conn.WriteJSON(message)
 }
 
 func sendDisplayCount(conn *websocket.Conn) error {
 	displayCount := screenshot.NumActiveDisplays()
-	log.Printf("Sending display count: %d", displayCount)
 	return sendJSONMessage(conn, map[string]interface{}{
 		"type":  "displayCount",
 		"count": displayCount,
@@ -83,53 +75,46 @@ func main() {
 		log.Fatal("Failed to parse server address:", err)
 	}
 
-	log.Println("Connecting to server...")
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
 		log.Fatal("Failed to connect to server:", err)
 	}
 	defer conn.Close()
-	log.Println("Connected to server")
 
-	// Identify as Go client
-	log.Println("Sending Go client identification")
 	if err := sendJSONMessage(conn, map[string]string{"type": "goClient"}); err != nil {
 		log.Fatal("Failed to identify as Go client:", err)
 	}
 
-	// Handle incoming messages
 	go func() {
 		for {
-			_, message, err := conn.ReadMessage()
-			if err != nil {
-				log.Println("Read error:", err)
-				return
-			}
-			log.Printf("Received message: %s", string(message))
-
 			var msg struct {
 				Type    string `json:"type"`
 				Display int    `json:"display"`
 			}
-			if err := json.Unmarshal(message, &msg); err != nil {
-				log.Printf("Failed to parse message: %v", err)
-				continue
+			if err := conn.ReadJSON(&msg); err != nil {
+				log.Println("Read error:", err)
+				return
 			}
 
 			switch msg.Type {
 			case "goClient":
-				log.Println("Received goClient acknowledgment from server")
 				if err := sendDisplayCount(conn); err != nil {
 					log.Println("Failed to send display count:", err)
 				}
 			case "requestDisplayCount":
-				log.Println("Received request for display count")
 				if err := sendDisplayCount(conn); err != nil {
 					log.Println("Failed to send display count:", err)
 				}
 			case "selectDisplay":
-				currentDisplay = msg.Display
-				log.Printf("Switched to display: %d", currentDisplay)
+				displayMutex.Lock()
+				activeDisplays[msg.Display] = true
+				displayMutex.Unlock()
+				log.Printf("Display %d selected", msg.Display)
+			case "unselectDisplay":
+				displayMutex.Lock()
+				delete(activeDisplays, msg.Display)
+				displayMutex.Unlock()
+				log.Printf("Display %d unselected", msg.Display)
 			default:
 				log.Printf("Unknown message type: %s", msg.Type)
 			}
@@ -140,16 +125,28 @@ func main() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		frame, err := captureAndEncodeFrame(currentDisplay)
-		if err != nil {
-			log.Printf("Failed to capture and encode frame: %v", err)
-			continue
+		displayMutex.Lock()
+		displays := make([]int, 0, len(activeDisplays))
+		for d := range activeDisplays {
+			displays = append(displays, d)
 		}
+		displayMutex.Unlock()
 
-		log.Printf("Sending frame of size: %d bytes", len(frame))
-		if err := conn.WriteMessage(websocket.BinaryMessage, frame); err != nil {
-			log.Println("Failed to send frame:", err)
-			return
+		for _, display := range displays {
+			frameData, err := captureAndEncodeFrame(display)
+			if err != nil {
+				log.Printf("Failed to capture and encode frame for display %d: %v", display, err)
+				continue
+			}
+
+			if err := sendJSONMessage(conn, map[string]interface{}{
+				"type":    "frame",
+				"display": display,
+				"data":    frameData,
+			}); err != nil {
+				log.Println("Failed to send frame:", err)
+				return
+			}
 		}
 	}
 }

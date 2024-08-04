@@ -37,7 +37,8 @@
         const debug = document.getElementById('debug');
         const errorContainer = document.getElementById('error-container');
         const ws = new WebSocket('ws://' + window.location.host + '/ws');
-        ws.binaryType = 'arraybuffer';
+
+        let currentDisplay = parseInt('<%= initialDisplay %>');
 
         function log(message) {
             console.log(message);
@@ -56,21 +57,10 @@
             ctx.drawImage(imgObj, 0, 0);
         };
 
-        imgObj.onerror = function(error) {
-            log('Error loading image: ' + error.message);
-        };
-
-        let currentDisplay = 0;
-
-        const urlParams = new URLSearchParams(window.location.search);
-        const initialDisplay = parseInt(urlParams.get('display')) || 0;
-
         ws.onopen = () => {
             log('WebSocket connected');
-            // Request display count when connected
             ws.send(JSON.stringify({ type: 'requestDisplayCount' }));
-            // Select the initial display
-            selectDisplay(initialDisplay);
+            selectDisplay(currentDisplay);
         };
 
         ws.onclose = () => {
@@ -82,68 +72,58 @@
         };
 
         ws.onmessage = (event) => {
-            if (!(event.data instanceof ArrayBuffer)) {
-                log('Received message type: ' + typeof event.data);
-            }
-            if (typeof event.data === 'string') {
-                log('Received string message: ' + event.data);
-                try {
-                    const data = JSON.parse(event.data);
-                    log('Parsed JSON: ' + JSON.stringify(data));
-                    if (data.type === 'displayCount') {
-                        log('Display count received: ' + data.count);
-                        createButtons(data.count);
-                    } else if (data.type === 'error') {
-                        log('Error received: ' + data.message);
-                        showError(data.message);
-                    } else {
-                        log('Unknown message type: ' + data.type);
-                    }
-                } catch (e) {
-                    log('Error parsing JSON: ' + e.message);
-                }
-            } else if (event.data instanceof ArrayBuffer) {
-                const arrayBuffer = event.data;
-                
-                // Decompress the data (assuming it's compressed with zlib)
-                const compressed = new Uint8Array(arrayBuffer);
-                try {
-                    // Use pako library for zlib decompression
-                    const decompressed = pako.inflate(compressed);
-                    const blob = new Blob([decompressed], { type: 'image/jpeg' });
+            try {
+                const message = JSON.parse(event.data);
+                if (message.type === 'frame' && message.display === currentDisplay) {
+                    const compressed = atob(message.data);
+                    const charData = compressed.split('').map(x => x.charCodeAt(0));
+                    const binData = new Uint8Array(charData);
+                    const data = pako.inflate(binData);
+                    const blob = new Blob([data], { type: 'image/jpeg' });
                     const url = URL.createObjectURL(blob);
                     imgObj.src = url;
-                } catch (error) {
-                    log('Error decompressing data: ' + error.message);
+                } else if (message.type === 'displayCount') {
+                    log('Display count received: ' + message.count);
+                    createButtons(message.count);
+                } else if (message.type === 'error') {
+                    log('Error received: ' + message.message);
+                    showError(message.message);
                 }
-            } else {
-                log('Received unknown data type');
+            } catch (e) {
+                log('Error processing message: ' + e.message);
             }
         };
 
         function createButtons(count) {
-            log('Creating ' + count + ' buttons');
-            panel.innerHTML = ''; // Clear existing buttons
+            panel.innerHTML = '';
             for (let i = 0; i < count; i++) {
                 const button = document.createElement('button');
                 button.className = 'action-button';
                 button.innerHTML = `<span>Monitor ${i + 1}</span>`;
                 button.addEventListener('click', () => selectDisplay(i));
                 panel.appendChild(button);
-                log('Button created for Monitor ' + (i + 1));
             }
-            log('Total buttons created: ' + panel.children.length);
-            selectDisplay(currentDisplay); // Select the current display
+            updateActiveButton();
         }
 
         function selectDisplay(displayIndex) {
-            log('Selecting display ' + displayIndex);
+            if (currentDisplay !== displayIndex) {
+                ws.send(JSON.stringify({ type: 'unselectDisplay', display: currentDisplay }));
+            }
             currentDisplay = displayIndex;
-            document.querySelectorAll('.action-button').forEach((btn, index) => {
-                btn.classList.toggle('active', index === displayIndex);
-            });
-            ws.send(JSON.stringify({ type: 'selectDisplay', display: displayIndex }));
+            ws.send(JSON.stringify({ type: 'selectDisplay', display: currentDisplay }));
+            updateActiveButton();
         }
+
+        function updateActiveButton() {
+            document.querySelectorAll('.action-button').forEach((btn, index) => {
+                btn.classList.toggle('active', index === currentDisplay);
+            });
+        }
+
+        window.addEventListener('beforeunload', () => {
+            ws.send(JSON.stringify({ type: 'unselectDisplay', display: currentDisplay }));
+        });
     </script>
 </body>
 </html>

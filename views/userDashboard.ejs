@@ -96,8 +96,8 @@
                 }
                 if (menuRect.bottom > previewRect.bottom) {
                     displayMenu.style.top = `${previewRect.height - menuRect.height}px`;
-                }
-                */
+                }*/
+                
                 if (displayCount === 0) {
                     // If we haven't received the display count yet, request it again
                     socket.send(JSON.stringify({ type: 'requestDisplayCount' }));
@@ -121,16 +121,17 @@
 
         function openFullscreen(display) {
             console.log('Opening fullscreen for display:', display);
-            if (fullscreenWindows[display]) {
-                if (!fullscreenWindows[display].closed) {
-                    fullscreenWindows[display].focus();
-                    return;
-                }
-            }
             const windowName = `FullscreenStream_${display}`;
+            
+            // Close the existing window if it's open
+            if (fullscreenWindows[display] && !fullscreenWindows[display].closed) {
+                fullscreenWindows[display].close();
+            }
+            
+            // Open a new window
             fullscreenWindows[display] = window.open(`/fullscreen?display=${display}`, windowName, 'width=800,height=600');
             
-            // Optional: You can add an event listener to remove the reference when the window is closed
+            // Add an event listener to remove the reference when the window is closed
             fullscreenWindows[display].addEventListener('beforeunload', () => {
                 fullscreenWindows[display] = null;
             });
@@ -149,20 +150,21 @@
         };
 
         socket.onmessage = function(event) {
-            if (typeof event.data === 'string') {
-                try {
-                    const data = JSON.parse(event.data);
-                    console.log('Received data:', data);
-                    if (data.type === 'displayCount') {
-                        displayCount = data.count;
-                        console.log('Display count:', displayCount);
-                        createDisplayButtons(displayCount);
-                    }
-                } catch (error) {
-                    console.error('Error parsing message:', error);
-                }
-            } else if (event.data instanceof Blob) {
-                console.log('Received binary data');
+            try {
+                const data = JSON.parse(event.data);
+                console.log('Received data:', data);
+                if (data.type === 'displayCount') {
+                    displayCount = data.count;
+                    console.log('Display count:', displayCount);
+                    createDisplayButtons(displayCount);
+                }else if (data.type === 'forceLogout') {
+                console.log('Received force logout signal');
+                // Perform client-side logout actions
+                alert('Your session has been terminated. You will be logged out.');
+                window.location.href = '/logout'; // Redirect to the server's logout route
+                 }
+            } catch (error) {
+                console.error('Error parsing message:', error);
             }
         };
 

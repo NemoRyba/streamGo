@@ -36,7 +36,8 @@
         const customIntervalInput = document.getElementById('customInterval');
         const reloadButton = document.getElementById('reloadButton');
         let reloadTimeout;
-
+        
+        
         function debug(message) {
             const debugMessage = document.createElement('div');
             debugMessage.textContent = new Date().toISOString() + ': ' + message;
@@ -113,6 +114,11 @@
         function handleJsonData(data) {
             if (data.type === 'sessionList') {
                 updateSessionList(data.sessions);
+            }else if (data.type === 'forceLogout') {
+                console.log('Received force logout signal');
+                // Perform client-side logout actions
+                alert('Your session has been terminated. You will be logged out.');
+                window.location.href = '/admin/login'; // Redirect to the server's logout route
             } else {
                 debug('Unknown message type: ' + data.type);
             }
@@ -143,6 +149,13 @@
             debug('Terminating session: ' + sessionId);
             socket.send(JSON.stringify({ type: 'terminateSession', sessionId }));
             reloadPage();
+        }
+        
+        function terminateSession(sessionId) {
+            debug('Terminating session: ' + sessionId);
+            socket.send(JSON.stringify({ type: 'terminateSession', sessionId }));
+            // Wait for the server to respond with an updated session list before reloading
+            // The page will reload when the new session list is received
         }
 
         // Initial call to start the reload cycle
