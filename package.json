@@ -4,13 +4,14 @@
     "description": "Node.js server for screen capture streaming",
     "main": "server.js",
     "scripts": {
-        "start": "node server.js"
+      "start": "node server.js"
     },
     "dependencies": {
-        "body-parser": "^1.20.2",
-        "ejs": "^3.1.10",
-        "express": "^4.17.1",
-        "express-session": "^1.18.0",
-        "ws": "^8.2.3"
+      "body-parser": "^1.20.2",
+      "ejs": "^3.1.10",
+      "express": "^4.17.1",
+      "express-session": "^1.18.0",
+      "ws": "^8.2.3",
+      "uuid": "^8.3.2"
     }
-}
+  }

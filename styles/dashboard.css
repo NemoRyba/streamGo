@@ -1,0 +1,108 @@
+body {
+    font-family: Arial, sans-serif;
+    margin: 0;
+    padding: 20px;
+    background-image: url('/giza_plane.jpg');
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    background-attachment: fixed;
+    min-height: 100vh;
+    box-sizing: border-box;
+}
+
+.container {
+    background-color: rgba(223, 221, 221, 0.644);
+    padding: 20px;
+    border-radius: 5px;
+    box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    margin-top: 70px; /* Add this line to create space below the reload controls */
+    margin-left: 20px; /* Add this line to align with the reload controls */
+    margin-right: 20px; /* Add this line for consistency */
+}
+h1 {
+    color: #333;
+}
+.logout {
+    float: right;
+    background-color: #f44336;
+    color: white;
+    padding: 10px 15px;
+    text-decoration: none;
+    border-radius: 3px;
+}
+
+/* Add these styles at the end of the file */
+ul#sessionList {
+    list-style-type: none;
+    padding: 0;
+}
+
+ul#sessionList li {
+    margin-bottom: 10px;
+    padding: 5px;
+    background-color: rgba(255, 255, 255, 0.7);
+    border-radius: 3px;
+}
+
+ul#sessionList button {
+    margin-left: 10px;
+    background-color: #f44336;
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+}
+#debugConsole {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 150px;
+    background-color: rgba(0, 0, 0, 0.8);
+    color: #00ff00;
+    font-family: monospace;
+    font-size: 12px;
+    padding: 10px;
+    overflow-y: auto;
+    z-index: 1000;
+}
+
+#debugConsole div {
+    margin-bottom: 5px;
+}
+#reloadControls {
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    z-index: 1000;
+    background-color: rgba(255, 255, 255, 0.8);
+    padding: 5px;
+    border-radius: 5px;
+}
+#reloadControls {
+    position: fixed;
+    top: 20px;
+    left: 20px;
+    z-index: 1000;
+    background-color: rgba(255, 255, 255, 0.8);
+    padding: 10px;
+    border-radius: 5px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+}
+#reloadInterval {
+    width: 100px;
+    margin-right: 5px;
+}
+#customInterval {
+    width: 60px;
+    margin-right: 5px;
+}
+#reloadButton {
+    cursor: pointer;
+    background: none;
+    border: none;
+    font-size: 20px;
+    vertical-align: middle;
+}

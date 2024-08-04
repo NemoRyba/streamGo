@@ -4,38 +4,149 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin Dashboard</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background-color: #f0f0f0;
-        }
-        .container {
-            background-color: white;
-            padding: 20px;
-            border-radius: 5px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.1);
-        }
-        h1 {
-            color: #333;
-        }
-        .logout {
-            float: right;
-            background-color: #f44336;
-            color: white;
-            padding: 10px 15px;
-            text-decoration: none;
-            border-radius: 3px;
-        }
-    </style>
+    <link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
+    <div id="reloadControls">
+        <select id="reloadInterval">
+            <option value="5">5 sec</option>
+            <option value="10">10 sec</option>
+            <option value="30">30 sec</option>
+            <option value="60">60 sec</option>
+            <option value="120">120 sec</option>
+            <option value="custom">Custom</option>
+        </select>
+        <input type="number" id="customInterval" style="display: none;" min="1" max="120" value="30">
+        <button id="reloadButton" title="Reload Now">&#x21BB;</button>
+    </div>
+
     <div class="container">
         <a href="/admin/logout" class="logout">Logout</a>
         <h1>Welcome, <%= user.username %>!</h1>
-        <p>This is your admin dashboard. You can add more admin functionality here.</p>
-        <!-- Add more admin controls and information here -->
+        <h2>Active Sessions</h2>
+        <ul id="sessionList"></ul>
     </div>
+
+    <div id="debugConsole"></div>
+    <script>
+       const socket = new WebSocket('ws://' + window.location.host + '/admin');
+        const sessionList = document.getElementById('sessionList');
+        const debugConsole = document.getElementById('debugConsole');
+        const reloadIntervalSelect = document.getElementById('reloadInterval');
+        const customIntervalInput = document.getElementById('customInterval');
+        const reloadButton = document.getElementById('reloadButton');
+        let reloadTimeout;
+
+        function debug(message) {
+            const debugMessage = document.createElement('div');
+            debugMessage.textContent = new Date().toISOString() + ': ' + message;
+            debugConsole.appendChild(debugMessage);
+            debugConsole.scrollTop = debugConsole.scrollHeight;
+        }
+
+        function reloadPage() {
+            clearTimeout(reloadTimeout);
+            let interval = parseInt(reloadIntervalSelect.value) * 1000;
+            
+            if (reloadIntervalSelect.value === 'custom') {
+                interval = parseInt(customIntervalInput.value) * 1000;
+            }
+
+            reloadTimeout = setTimeout(function() {
+                location.reload();
+            }, interval);
+        }
+
+        reloadIntervalSelect.addEventListener('change', function() {
+            if (this.value === 'custom') {
+                customIntervalInput.style.display = 'inline-block';
+                customIntervalInput.value = 30; // Default custom value
+            } else {
+                customIntervalInput.style.display = 'none';
+            }
+            reloadPage();
+        });
+
+        customIntervalInput.addEventListener('input', function() {
+            if (this.value < 1) this.value = 1;
+            if (this.value > 120) this.value = 120;
+            reloadPage();
+        });
+
+        reloadButton.addEventListener('click', function() {
+            location.reload();
+        });
+
+        socket.onopen = function(event) {
+            debug('WebSocket connection opened');
+        };
+
+        socket.onmessage = function(event) {
+            debug('Received message');
+            
+            if (event.data instanceof Blob) {
+                const reader = new FileReader();
+                reader.onload = function() {
+                    try {
+                        const jsonData = JSON.parse(reader.result);
+                        handleJsonData(jsonData);
+                    } catch (error) {
+                        debug('Error parsing Blob data: ' + error.message);
+                        debug('Raw Blob data: ' + reader.result);
+                    }
+                };
+                reader.onerror = function(error) {
+                    debug('Error reading Blob: ' + error);
+                };
+                reader.readAsText(event.data);
+            } else {
+                try {
+                    const jsonData = JSON.parse(event.data);
+                    handleJsonData(jsonData);
+                } catch (error) {
+                    debug('Error parsing message: ' + error.message);
+                    debug('Raw message data: ' + event.data);
+                }
+            }
+        };
+
+        function handleJsonData(data) {
+            if (data.type === 'sessionList') {
+                updateSessionList(data.sessions);
+            } else {
+                debug('Unknown message type: ' + data.type);
+            }
+        }
+
+        socket.onerror = function(error) {
+            debug('WebSocket error: ' + error.message);
+        };
+
+        socket.onclose = function(event) {
+            debug('WebSocket connection closed');
+        };
+
+        function updateSessionList(sessions) {
+            sessionList.innerHTML = '';
+            sessions.forEach(session => {
+                const li = document.createElement('li');
+                li.textContent = `${session.type} - ${session.id} `;
+                const terminateButton = document.createElement('button');
+                terminateButton.textContent = 'Terminate';
+                terminateButton.onclick = () => terminateSession(session.id);
+                li.appendChild(terminateButton);
+                sessionList.appendChild(li);
+            });
+        }
+
+        function terminateSession(sessionId) {
+            debug('Terminating session: ' + sessionId);
+            socket.send(JSON.stringify({ type: 'terminateSession', sessionId }));
+            reloadPage();
+        }
+
+        // Initial call to start the reload cycle
+        reloadPage();
+    </script>
 </body>
 </html>

@@ -4,6 +4,7 @@ const WebSocket = require('ws');
 const path = require('path');
 const session = require('express-session');
 const bodyParser = require('body-parser');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const server = http.createServer(app);
@@ -11,6 +12,9 @@ const wss = new WebSocket.Server({ server });
 
 // Middleware
 app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'res')));
+app.use(express.static(path.join(__dirname, 'styles')));
+
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(session({
   secret: 'your-secret-key',
@@ -67,6 +71,8 @@ app.get('/admin/logout', (req, res) => {
 });
 
 let goClient = null;
+let sessions = new Map();
+let adminSocket = null;
 
 function isJsonMessage(buffer) {
   const str = buffer.toString('utf8');
@@ -78,27 +84,24 @@ function isJsonMessage(buffer) {
   }
 }
 
-
-
 function handleJSONMessage(ws, jsonMessage) {
   console.log('Parsed JSON message:', jsonMessage);
 
-    if (jsonMessage.type === 'goClient') {
-      console.log('Go client identified and connected');
-      goClient = ws;
-    } else if (jsonMessage.type === 'requestDisplayCount') {
-      console.log('Received display count request from browser');
-      if (goClient && goClient.readyState === WebSocket.OPEN) {
-        console.log('Forwarding display count request to Go client');
-        goClient.send(JSON.stringify(jsonMessage));
-      } else {
-        console.log('Go client not available to handle display count request');
-        // Send error message to the browser
-        ws.send(JSON.stringify({
-          type: 'error',
-          message: 'Go client is not available. Please ensure the Go client is running and connected.'
-        }));
-      }
+  if (jsonMessage.type === 'goClient') {
+    console.log('Go client identified and connected');
+    goClient = ws;
+  } else if (jsonMessage.type === 'requestDisplayCount') {
+    console.log('Received display count request from browser');
+    if (goClient && goClient.readyState === WebSocket.OPEN) {
+      console.log('Forwarding display count request to Go client');
+      goClient.send(JSON.stringify(jsonMessage));
+    } else {
+      console.log('Go client not available to handle display count request');
+      ws.send(JSON.stringify({
+        type: 'error',
+        message: 'Go client is not available. Please ensure the Go client is running and connected.'
+      }));
+    }
   } else if (jsonMessage.type === 'displayCount') {
     console.log(`Received display count: ${jsonMessage.count}`);
     wss.clients.forEach((client) => {
@@ -115,16 +118,47 @@ function handleJSONMessage(ws, jsonMessage) {
     } else {
       console.log('Go client not available to handle select display request');
     }
+  } else if (jsonMessage.type === 'terminateSession') {
+    terminateSession(jsonMessage.sessionId);
   } else {
     console.log('Unknown message type:', jsonMessage.type);
   }
 }
 
-wss.on('connection', (ws, req) => {
-  console.log(`New WebSocket connection from ${req.socket.remoteAddress}`);
+function sendSessionList() {
+  if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
+    const sessionList = Array.from(sessions.values()).map(({ id, type }) => ({ id, type }));
+    adminSocket.send(JSON.stringify({ type: 'sessionList', sessions: sessionList }));
+  }
+}
 
-  ws.on('message', (message) => {
-    if (isJsonMessage(message)) {
+function terminateSession(sessionId) {
+  const session = sessions.get(sessionId);
+  if (session) {
+    session.ws.close();
+    sessions.delete(sessionId);
+    console.log(`Terminated session: ${sessionId}`);
+    sendSessionList();
+  }
+}
+
+wss.on('connection', (ws, req) => {
+    const sessionId = uuidv4();
+    const isAdminConnection = req.url === '/admin';
+    const sessionType = isAdminConnection ? 'Admin' : (ws === goClient ? 'Go Client' : 'Browser');
+    const session = { id: sessionId, type: sessionType, ws };
+    sessions.set(sessionId, session);
+  
+    console.log(`New WebSocket connection from ${req.socket.remoteAddress}`);
+    console.log(`New ${sessionType} connection: ${sessionId}`);
+  
+    if (isAdminConnection) {
+      adminSocket = ws;
+      sendSessionList();
+    }
+  
+    ws.on('message', (message) => {
+      if (isJsonMessage(message)) {
         console.log('Received JSON message');
         try {
           const jsonMessage = JSON.parse(message.toString('utf8'));
@@ -132,26 +166,32 @@ wss.on('connection', (ws, req) => {
         } catch (e) {
           console.error('Error parsing JSON:', e);
         }
-    } else {
-      console.log('Received binary frame data, length:', message.length);
-      // Only send frame data to browser clients
-      wss.clients.forEach((client) => {
-        if (client !== goClient && client !== ws && client.readyState === WebSocket.OPEN) {
-          client.send(message);
-        }
-      });
-    }
+      } else {
+        console.log('Received binary frame data, length:', message.length);
+        // Only send frame data to browser clients, excluding admin connections
+        wss.clients.forEach((client) => {
+          if (client !== goClient && client !== ws && client !== adminSocket && client.readyState === WebSocket.OPEN) {
+            client.send(message);
+          }
+        });
+      }
+    });
+  
+    ws.on('close', () => {
+      sessions.delete(sessionId);
+      if (ws === goClient) {
+        console.log('Go client disconnected');
+        goClient = null;
+      } else if (ws === adminSocket) {
+        console.log('Admin disconnected');
+        adminSocket = null;
+      } else {
+        console.log(`${sessionType} client disconnected: ${sessionId}`);
+      }
+      sendSessionList();
+    });
   });
-
-  ws.on('close', () => {
-    if (ws === goClient) {
-      console.log('Go client disconnected');
-      goClient = null;
-    } else {
-      console.log('Browser client disconnected');
-    }
-  });
-});
+  
 
 const PORT = 3000;
 server.listen(PORT, () => {
