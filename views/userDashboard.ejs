@@ -58,11 +58,31 @@
         </div>
     </div>
 
+
+
     <script>
+const username = '<%= user.username %>';
+        const socket = new WebSocket('ws://' + window.location.host + '/ws?username=' + encodeURIComponent(username));
         const streamPreview = document.getElementById('streamPreview');
         const displayMenu = document.getElementById('displayMenu');
         let displayCount = 0;
+        let selectedDisplay = 0;
+        let previewRequestInProgress = false;
         let fullscreenWindows = {};
+        function updatePreviewImage() {
+            const img = streamPreview.querySelector('img');
+            const newSrc = `/api/latest-preview?display=${selectedDisplay}&t=${new Date().getTime()}`;
+            console.log('Updating preview image with src:', newSrc);
+            img.src = newSrc;
+        }
+
+        function requestLatestPreview() {
+            if (!previewRequestInProgress && selectedDisplay !== null) {
+                console.log('Requesting latest preview for display:', selectedDisplay);
+                previewRequestInProgress = true;
+                socket.send(JSON.stringify({ type: 'requestLatestPreview', display: selectedDisplay }));
+            }
+        }
 
         streamPreview.addEventListener('click', (event) => {
             event.stopPropagation();
@@ -87,19 +107,7 @@
                 displayMenu.style.left = `${x}px`;
                 displayMenu.style.top = `${y}px`;
                 
-                // Ensure the menu doesn't go out of the preview bounds
-                /*const menuRect = displayMenu.getBoundingClientRect();
-                const previewRect = streamPreview.getBoundingClientRect();
-                
-                if (menuRect.right > previewRect.right) {
-                    displayMenu.style.left = `${previewRect.width - menuRect.width}px`;
-                }
-                if (menuRect.bottom > previewRect.bottom) {
-                    displayMenu.style.top = `${previewRect.height - menuRect.height}px`;
-                }*/
-                
                 if (displayCount === 0) {
-                    // If we haven't received the display count yet, request it again
                     socket.send(JSON.stringify({ type: 'requestDisplayCount' }));
                 }
             }
@@ -110,17 +118,24 @@
             displayMenu.innerHTML = '';
             for (let i = 0; i < count; i++) {
                 const button = document.createElement('button');
-                button.textContent = `Display ${i + 1}`;
+                button.textContent = `Display ${i}`;
                 button.onclick = () => {
-                    openFullscreen(i);
+                    selectDisplay(i);
                     displayMenu.style.display = 'none';
                 };
                 displayMenu.appendChild(button);
             }
         }
 
+        function selectDisplay(display) {
+            console.log('Selecting display:', display);
+            selectedDisplay = display;
+            requestLatestPreview();
+            updatePreviewImage();
+            openFullscreen(display);
+        }
+
         function openFullscreen(display) {
-            console.log('Opening fullscreen for display:', display);
             const windowName = `FullscreenStream_${display}`;
             
             // Close the existing window if it's open
@@ -137,13 +152,6 @@
             });
         }
 
-        function updatePreviewImage() {
-            const img = streamPreview.querySelector('img');
-            img.src = `/api/latest-frame?t=${new Date().getTime()}`;
-        }
-
-        const socket = new WebSocket('ws://' + window.location.host + '/ws');
-
         socket.onopen = function(event) {
             console.log('WebSocket connection opened');
             socket.send(JSON.stringify({ type: 'requestDisplayCount' }));
@@ -157,12 +165,17 @@
                     displayCount = data.count;
                     console.log('Display count:', displayCount);
                     createDisplayButtons(displayCount);
-                }else if (data.type === 'forceLogout') {
-                console.log('Received force logout signal');
-                // Perform client-side logout actions
-                alert('Your session has been terminated. You will be logged out.');
-                window.location.href = '/logout'; // Redirect to the server's logout route
-                 }
+                } else if (data.type === 'previewAvailable') {
+                    if (data.display === selectedDisplay) {
+                        console.log('New preview available, updating image');
+                        updatePreviewImage();
+                        previewRequestInProgress = false;
+                    }
+                } else if (data.type === 'error') {
+                    console.error('Error:', data.message);
+                    alert(data.message);
+                    previewRequestInProgress = false;
+                }
             } catch (error) {
                 console.error('Error parsing message:', error);
             }
@@ -176,7 +189,12 @@
             console.log('WebSocket connection closed');
         };
 
-        setInterval(updatePreviewImage, 3000); // Update every 3 seconds
+        // Request a new preview every 5 seconds
+        setInterval(() => {
+            if (selectedDisplay !== null) {
+                requestLatestPreview();
+            }
+        }, 5000);
     </script>
 </body>
 </html>

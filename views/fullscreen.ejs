@@ -17,6 +17,17 @@
             height: 100%;
             object-fit: contain;
         }
+        #debug {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 10px;
+            font-family: monospace;
+            max-height: 200px;
+            overflow-y: auto;
+        }
     </style>
 </head>
 <body>
@@ -36,7 +47,7 @@
         const panel = document.getElementById('panel');
         const debug = document.getElementById('debug');
         const errorContainer = document.getElementById('error-container');
-        const ws = new WebSocket('ws://' + window.location.host + '/ws');
+        const ws = new WebSocket('ws://' + window.location.host + '/ws?username=' + encodeURIComponent('<%= user.username %>'));
 
         let currentDisplay = parseInt('<%= initialDisplay %>');
 
@@ -48,14 +59,40 @@
 
         function showError(message) {
             errorContainer.innerHTML = `<div class="error-message">${message}</div>`;
+            log('Error: ' + message);
         }
 
         let imgObj = new Image();
         imgObj.onload = function() {
+            log('Image loaded, dimensions: ' + imgObj.width + 'x' + imgObj.height);
             canvas.width = imgObj.width;
             canvas.height = imgObj.height;
             ctx.drawImage(imgObj, 0, 0);
+            log('Image drawn to canvas');
         };
+
+        imgObj.onerror = function(error) {
+            log('Error loading image: ' + error);
+        };
+
+        function fetchFullFrame(display) {
+            log('Fetching full frame for display: ' + display);
+            fetch(`/api/latest-frame?display=${display}&t=${new Date().getTime()}`)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('Network response was not ok');
+                    }
+                    return response.blob();
+                })
+                .then(blob => {
+                    log('Received frame blob, size: ' + blob.size);
+                    const url = URL.createObjectURL(blob);
+                    imgObj.src = url;
+                })
+                .catch(error => {
+                    showError('Error fetching frame: ' + error.message);
+                });
+        }
 
         ws.onopen = () => {
             log('WebSocket connected');
@@ -74,23 +111,18 @@
         ws.onmessage = (event) => {
             try {
                 const message = JSON.parse(event.data);
-                if (message.type === 'frame' && message.display === currentDisplay) {
-                    const compressed = atob(message.data);
-                    const charData = compressed.split('').map(x => x.charCodeAt(0));
-                    const binData = new Uint8Array(charData);
-                    const data = pako.inflate(binData);
-                    const blob = new Blob([data], { type: 'image/jpeg' });
-                    const url = URL.createObjectURL(blob);
-                    imgObj.src = url;
+                log('Received message type: ' + message.type);
+                if (message.type === 'previewAvailable' && message.display === currentDisplay) {
+                    log('Preview available for current display. Fetching full frame.');
+                    fetchFullFrame(currentDisplay);
                 } else if (message.type === 'displayCount') {
                     log('Display count received: ' + message.count);
                     createButtons(message.count);
                 } else if (message.type === 'error') {
-                    log('Error received: ' + message.message);
-                    showError(message.message);
+                    showError('Error received: ' + message.message);
                 }
             } catch (e) {
-                log('Error processing message: ' + e.message);
+                showError('Error processing message: ' + e.message);
             }
         };
 
@@ -99,7 +131,7 @@
             for (let i = 0; i < count; i++) {
                 const button = document.createElement('button');
                 button.className = 'action-button';
-                button.innerHTML = `<span>Monitor ${i + 1}</span>`;
+                button.innerHTML = `<span>Monitor ${i}</span>`;
                 button.addEventListener('click', () => selectDisplay(i));
                 panel.appendChild(button);
             }
@@ -107,12 +139,14 @@
         }
 
         function selectDisplay(displayIndex) {
+            log('Selecting display: ' + displayIndex);
             if (currentDisplay !== displayIndex) {
                 ws.send(JSON.stringify({ type: 'unselectDisplay', display: currentDisplay }));
             }
             currentDisplay = displayIndex;
             ws.send(JSON.stringify({ type: 'selectDisplay', display: currentDisplay }));
             updateActiveButton();
+            fetchFullFrame(currentDisplay);  // Fetch initial frame for the selected display
         }
 
         function updateActiveButton() {

@@ -5,136 +5,160 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin Dashboard</title>
     <link rel="stylesheet" href="/dashboard.css">
+    <style>
+        .folder {
+            cursor: pointer;
+            padding: 10px;
+            background-color: #f0f0f0;
+            margin-bottom: 5px;
+        }
+        .folder:hover {
+            background-color: #e0e0e0;
+        }
+        .session-list {
+            display: none;
+            margin-left: 20px;
+        }
+        .back-button {
+            display: none;
+            margin-bottom: 10px;
+        }
+        #reloadControls {
+            margin-bottom: 20px;
+        }
+    </style>
 </head>
 <body>
-    <div id="reloadControls">
-        <select id="reloadInterval">
-            <option value="5">5 sec</option>
-            <option value="10">10 sec</option>
-            <option value="30">30 sec</option>
-            <option value="60">60 sec</option>
-            <option value="120">120 sec</option>
-            <option value="custom">Custom</option>
-        </select>
-        <input type="number" id="customInterval" style="display: none;" min="1" max="120" value="30">
-        <button id="reloadButton" title="Reload Now">&#x21BB;</button>
-    </div>
-
     <div class="container">
         <a href="/admin/logout" class="logout">Logout</a>
         <h1>Welcome, <%= user.username %>!</h1>
+        <div id="reloadControls">
+            <select id="reloadInterval">
+                <option value="3">3 sec</option>
+                <option value="5">5 sec</option>
+                <option value="10">10 sec</option>
+            </select>
+            <button id="forceRefresh">Force Refresh</button>
+        </div>
         <h2>Active Sessions</h2>
-        <ul id="sessionList"></ul>
+        <button id="backButton" class="back-button">Back to Users</button>
+        <div id="sessionList"></div>
     </div>
 
     <div id="debugConsole"></div>
     <script>
-       const socket = new WebSocket('ws://' + window.location.host + '/admin');
+        const username = '<%= user.username %>';
+        const socket = new WebSocket('ws://' + window.location.host + '/admin?username=' + encodeURIComponent(username));
         const sessionList = document.getElementById('sessionList');
         const debugConsole = document.getElementById('debugConsole');
+        const backButton = document.getElementById('backButton');
         const reloadIntervalSelect = document.getElementById('reloadInterval');
-        const customIntervalInput = document.getElementById('customInterval');
-        const reloadButton = document.getElementById('reloadButton');
-        let reloadTimeout;
-        
-        
+        const forceRefreshButton = document.getElementById('forceRefresh');
+        let currentView = 'users';
+        let refreshInterval;
+
         function debug(message) {
-            const debugMessage = document.createElement('div');
-            debugMessage.textContent = new Date().toISOString() + ': ' + message;
-            debugConsole.appendChild(debugMessage);
+            console.log(message);
+            debugConsole.innerHTML += message + '<br>';
             debugConsole.scrollTop = debugConsole.scrollHeight;
         }
 
-        function reloadPage() {
-            clearTimeout(reloadTimeout);
-            let interval = parseInt(reloadIntervalSelect.value) * 1000;
-            
-            if (reloadIntervalSelect.value === 'custom') {
-                interval = parseInt(customIntervalInput.value) * 1000;
-            }
-
-            reloadTimeout = setTimeout(function() {
-                location.reload();
-            }, interval);
+        function refreshData() {
+            socket.send(JSON.stringify({ type: 'requestSessionList' }));
         }
 
-        reloadIntervalSelect.addEventListener('change', function() {
-            if (this.value === 'custom') {
-                customIntervalInput.style.display = 'inline-block';
-                customIntervalInput.value = 30; // Default custom value
-            } else {
-                customIntervalInput.style.display = 'none';
-            }
-            reloadPage();
-        });
+        function setRefreshInterval() {
+            clearInterval(refreshInterval);
+            const interval = parseInt(reloadIntervalSelect.value) * 1000;
+            refreshInterval = setInterval(refreshData, interval);
+        }
 
-        customIntervalInput.addEventListener('input', function() {
-            if (this.value < 1) this.value = 1;
-            if (this.value > 120) this.value = 120;
-            reloadPage();
-        });
+        reloadIntervalSelect.addEventListener('change', setRefreshInterval);
+        forceRefreshButton.addEventListener('click', refreshData);
+        
+        function updatePreviewImage() {
+        const img = streamPreview.querySelector('img');
+        const newSrc = `/api/latest-frame?display=${selectedDisplay}&t=${new Date().getTime()}`;
+        console.log('Updating preview image with src:', newSrc);
+        img.src = newSrc;
+    }
 
-        reloadButton.addEventListener('click', function() {
-            location.reload();
-        });
+        socket.onopen = () => {
+            debug('WebSocket connected');
+            refreshData();
+            setRefreshInterval();
+        };
 
-        socket.onopen = function(event) {
-            debug('WebSocket connection opened');
+        socket.onclose = () => {
+            debug('WebSocket disconnected');
+        };
+
+        socket.onerror = (error) => {
+            debug('WebSocket error: ' + error.message);
         };
 
         socket.onmessage = function(event) {
-            debug('Received message');
-            
-            if (event.data instanceof Blob) {
-                const reader = new FileReader();
-                reader.onload = function() {
-                    try {
-                        const jsonData = JSON.parse(reader.result);
-                        handleJsonData(jsonData);
-                    } catch (error) {
-                        debug('Error parsing Blob data: ' + error.message);
-                        debug('Raw Blob data: ' + reader.result);
-                    }
-                };
-                reader.onerror = function(error) {
-                    debug('Error reading Blob: ' + error);
-                };
-                reader.readAsText(event.data);
-            } else {
                 try {
-                    const jsonData = JSON.parse(event.data);
-                    handleJsonData(jsonData);
+                    const data = JSON.parse(event.data);
+                    console.log('Received data:', data);
+                    if (data.type === 'displayCount') {
+                        displayCount = data.count;
+                        console.log('Display count:', displayCount);
+                        createDisplayButtons(displayCount);
+                    } else if (data.type === 'frameAvailable') {
+                        if (data.display === selectedDisplay) {
+                            console.log('New frame available, updating preview');
+                            updatePreviewImage();
+                        }
+                    } else if (data.type === 'error') {
+                        console.error('Error:', data.message);
+                        alert(data.message);
+                    }
                 } catch (error) {
-                    debug('Error parsing message: ' + error.message);
-                    debug('Raw message data: ' + event.data);
+                    console.error('Error parsing message:', error);
                 }
-            }
-        };
+            };
 
         function handleJsonData(data) {
             if (data.type === 'sessionList') {
                 updateSessionList(data.sessions);
-            }else if (data.type === 'forceLogout') {
+            } else if (data.type === 'forceLogout') {
                 console.log('Received force logout signal');
-                // Perform client-side logout actions
                 alert('Your session has been terminated. You will be logged out.');
-                window.location.href = '/admin/login'; // Redirect to the server's logout route
+                window.location.href = '/admin/login';
             } else {
                 debug('Unknown message type: ' + data.type);
             }
         }
 
-        socket.onerror = function(error) {
-            debug('WebSocket error: ' + error.message);
-        };
-
-        socket.onclose = function(event) {
-            debug('WebSocket connection closed');
-        };
-
         function updateSessionList(sessions) {
             sessionList.innerHTML = '';
-            sessions.forEach(session => {
+            if (currentView === 'users') {
+                Object.keys(sessions).forEach(username => {
+                    const folder = document.createElement('div');
+                    folder.className = 'folder';
+                    folder.textContent = `${username} (${sessions[username].length})`;
+                    folder.onclick = () => showUserSessions(username, sessions[username]);
+                    
+                    const terminateButton = document.createElement('button');
+                    terminateButton.textContent = 'Terminate All';
+                    terminateButton.onclick = (e) => {
+                        e.stopPropagation();
+                        terminateUserSessions(username);
+                    };
+                    folder.appendChild(terminateButton);
+                    
+                    sessionList.appendChild(folder);
+                });
+            }
+        }
+
+        function showUserSessions(username, userSessions) {
+            currentView = 'sessions';
+            sessionList.innerHTML = '';
+            backButton.style.display = 'block';
+            
+            userSessions.forEach(session => {
                 const li = document.createElement('li');
                 li.textContent = `${session.type} - ${session.id} `;
                 const terminateButton = document.createElement('button');
@@ -145,21 +169,29 @@
             });
         }
 
+        backButton.onclick = () => {
+            currentView = 'users';
+            backButton.style.display = 'none';
+            socket.send(JSON.stringify({ type: 'requestSessionList' }));
+        };
+
         function terminateSession(sessionId) {
             debug('Terminating session: ' + sessionId);
             socket.send(JSON.stringify({ type: 'terminateSession', sessionId }));
-            reloadPage();
-        }
-        
-        function terminateSession(sessionId) {
-            debug('Terminating session: ' + sessionId);
-            socket.send(JSON.stringify({ type: 'terminateSession', sessionId }));
-            // Wait for the server to respond with an updated session list before reloading
-            // The page will reload when the new session list is received
         }
 
-        // Initial call to start the reload cycle
-        reloadPage();
+        function terminateUserSessions(username) {
+            debug('Terminating all sessions for user: ' + username);
+            socket.send(JSON.stringify({ type: 'terminateUserSessions', username }));
+        }
+
+            // Request a new preview every 3 seconds
+        setInterval(() => {
+            console.log('Requesting latest preview');
+            socket.send(JSON.stringify({ type: 'requestLatestPreview', display: selectedDisplay }));
+        }, 3000);
+
+
     </script>
 </body>
 </html>
