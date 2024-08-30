@@ -29,14 +29,21 @@ const (
 	reconnectInterval = 5 * time.Second
 )
 
+type Watcher struct {
+	userID string
+	conn   *websocket.Conn
+}
+
 var (
-	captureBuffer        = &bytes.Buffer{}
-	compressBuffer       = &bytes.Buffer{}
-	displayMutex         sync.Mutex
-	userConnections      = make(map[string]*websocket.Conn)
-	userConnectionsMutex sync.Mutex
-	isConnected          bool
-	connectionMutex      sync.Mutex
+	captureBuffer  = &bytes.Buffer{}
+	compressBuffer = &bytes.Buffer{}
+	//	displayMutex         sync.Mutex
+	//	userConnections      = make(map[string]*websocket.Conn)
+	//	userConnectionsMutex sync.Mutex
+	isConnected     bool
+	connectionMutex sync.Mutex
+	watchers        = make(map[int][]Watcher)
+	watcherMutex    sync.RWMutex
 )
 
 type frameRequest struct {
@@ -71,12 +78,16 @@ func captureAndEncodeFrame(display int, isPreview bool) (string, error) {
 	}
 
 	captureBuffer.Reset()
-	if err := jpeg.Encode(captureBuffer, rgbaImg, &jpeg.Options{Quality: jpegQuality}); err != nil {
+	opt := jpeg.Options{Quality: jpegQuality}
+	if err := jpeg.Encode(captureBuffer, rgbaImg, &opt); err != nil {
 		return "", err
 	}
 
 	compressBuffer.Reset()
-	zw := zlib.NewWriter(compressBuffer)
+	zw, err := zlib.NewWriterLevelDict(compressBuffer, zlib.BestSpeed, nil)
+	if err != nil {
+		return "", err
+	}
 	if _, err := zw.Write(captureBuffer.Bytes()); err != nil {
 		return "", err
 	}
@@ -98,6 +109,35 @@ func sendDisplayCount(conn *websocket.Conn) error {
 		"type":  "displayCount",
 		"count": displayCount,
 	})
+}
+
+func captureAllPreviews() (map[int]string, error) {
+	previews := make(map[int]string)
+	for i := 0; i < screenshot.NumActiveDisplays(); i++ {
+		preview, err := captureAndEncodeFrame(i, true)
+		if err != nil {
+			return nil, err
+		}
+		previews[i] = preview
+	}
+	return previews, nil
+}
+
+func addWatcher(display int, userID string, conn *websocket.Conn) {
+	watcherMutex.Lock()
+	defer watcherMutex.Unlock()
+	watchers[display] = append(watchers[display], Watcher{userID: userID, conn: conn})
+}
+
+func removeWatcher(display int, userID string) {
+	watcherMutex.Lock()
+	defer watcherMutex.Unlock()
+	for i, w := range watchers[display] {
+		if w.userID == userID {
+			watchers[display] = append(watchers[display][:i], watchers[display][i+1:]...)
+			break
+		}
+	}
 }
 
 func runClient(done chan struct{}) {
@@ -211,11 +251,48 @@ func handleServerMessages(conn *websocket.Conn, frameRequests chan<- frameReques
 					log.Println("Failed to send frame:", err)
 				}
 			}
+		case "requestPreview":
+			previews, err := captureAllPreviews()
+			if err != nil {
+				log.Println("Failed to capture previews:", err)
+			} else {
+				if err := sendJSONMessage(conn, map[string]interface{}{
+					"type": "previews",
+					"data": previews,
+				}); err != nil {
+					log.Println("Failed to send previews:", err)
+				}
+			}
+		case "startWatching":
+			display := int(msg["display"].(float64))
+			userID := msg["userID"].(string)
+			addWatcher(display, userID, conn)
+		case "stopWatching":
+			display := int(msg["display"].(float64))
+			userID := msg["userID"].(string)
+			removeWatcher(display, userID)
 		case "directConnect":
 			browserEndpoint := msg["browserEndpoint"].(string)
 			go handleDirectConnection(browserEndpoint)
 		default:
 			log.Printf("Unknown message type: %s", msg["type"])
+		}
+	}
+}
+
+func sendFrameToWatchers(display int, frameData string) {
+	watcherMutex.RLock()
+	defer watcherMutex.RUnlock()
+
+	for _, watcher := range watchers[display] {
+		err := sendJSONMessage(watcher.conn, map[string]interface{}{
+			"type":    "frame",
+			"display": display,
+			"userID":  watcher.userID,
+			"data":    frameData,
+		})
+		if err != nil {
+			log.Printf("Failed to send frame to watcher %s: %v", watcher.userID, err)
 		}
 	}
 }
@@ -227,12 +304,11 @@ func handleFrameRequests(frameRequests <-chan frameRequest, connClosed <-chan st
 			frameData, err := captureAndEncodeFrame(req.display, req.isPreview)
 			if err != nil {
 				log.Printf("Failed to capture and encode frame for display %d: %v", req.display, err)
-				req.respond <- ""
 				continue
 			}
 
-			log.Printf("Captured frame for display %d, user %s, size: %d bytes", req.display, req.userID, len(frameData))
-			req.respond <- frameData
+			log.Printf("Captured frame for display %d, size: %d bytes", req.display, len(frameData))
+			sendFrameToWatchers(req.display, frameData)
 		case <-connClosed:
 			return
 		}
@@ -284,9 +360,32 @@ func handleDirectConnection(browserEndpoint string) {
 	}
 }
 
+func streamDisplays(frameRequests chan<- frameRequest, done <-chan struct{}) {
+	ticker := time.NewTicker(33 * time.Millisecond) // ~30 fps
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			watcherMutex.RLock()
+			for display, watcherList := range watchers {
+				if len(watcherList) > 0 {
+					frameRequests <- frameRequest{display: display, isPreview: false}
+				}
+			}
+			watcherMutex.RUnlock()
+		case <-done:
+			return
+		}
+	}
+}
+
 func main() {
 	done := make(chan struct{})
+	frameRequests := make(chan frameRequest)
+
 	go runClient(done)
+	go streamDisplays(frameRequests, done)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)

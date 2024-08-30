@@ -3,198 +3,250 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>User Dashboard</title>
+    <title>Admin Dashboard</title>
     <link rel="stylesheet" href="/dashboard.css">
-    <link rel="stylesheet" href="/screen-capture-styles.css">
     <style>
-        .stream-preview {
-            width: 200px;
-            height: 150px;
-            border: 2px solid #333;
-            margin: 20px;
+        .folder {
             cursor: pointer;
-            overflow: visible;
-            position: relative;
-        }
-        .stream-preview img {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-        }
-        #displayMenu {
-            display: none;
-            position: absolute;
-            background: rgba(0, 0, 0, 0.9);
             padding: 10px;
-            border-radius: 5px;
-            z-index: 10;
-            min-width: 120px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            background-color: #f0f0f0;
+            margin-bottom: 5px;
         }
-        #displayMenu button {
-            display: block;
-            width: 100%;
-            padding: 8px 10px;
-            margin: 5px 0;
-            background: none;
-            border: none;
-            color: white;
-            cursor: pointer;
-            text-align: left;
-            transition: background-color 0.3s;
+        .folder:hover {
+            background-color: #e0e0e0;
         }
-        #displayMenu button:hover {
-            background: rgba(255, 255, 255, 0.2);
+        .session-list {
+            display: none;
+            margin-left: 20px;
+        }
+        .back-button {
+            display: none;
+            margin-bottom: 10px;
+        }
+        #reloadControls {
+            margin-bottom: 20px;
+        }
+        #streamPreview {
+            margin-top: 20px;
+            text-align: center;
+        }
+        #streamPreview img {
+            max-width: 100%;
+            height: auto;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <a href="/logout" class="logout">Logout</a>
+        <a href="/admin/logout" class="logout">Logout</a>
         <h1>Welcome, <%= user.username %>!</h1>
-        <div class="stream-preview" id="streamPreview">
-            <img src="/api/latest-frame" alt="Stream Preview" width="200" height="150">
-            <div id="displayMenu"></div>
+        <div id="reloadControls">
+            <select id="reloadInterval">
+                <option value="3">3 sec</option>
+                <option value="5">5 sec</option>
+                <option value="10">10 sec</option>
+            </select>
+            <button id="forceRefresh">Force Refresh</button>
+        </div>
+        <h2>Active Sessions</h2>
+        <button id="backButton" class="back-button">Back to Users</button>
+        <div id="sessionList"></div>
+        <div id="streamPreview">
+            <h3>Stream Preview</h3>
+            <div id="displayButtons"></div>
+            <img src="" alt="Stream Preview" style="display: none;">
         </div>
     </div>
 
-
-
+    <div id="debugConsole"></div>
     <script>
-const username = '<%= user.username %>';
-        const socket = new WebSocket('ws://' + window.location.host + '/ws?username=' + encodeURIComponent(username));
+        const username = '<%= user.username %>';
+        let socket;
+        const sessionList = document.getElementById('sessionList');
+        const debugConsole = document.getElementById('debugConsole');
+        const backButton = document.getElementById('backButton');
+        const reloadIntervalSelect = document.getElementById('reloadInterval');
+        const forceRefreshButton = document.getElementById('forceRefresh');
         const streamPreview = document.getElementById('streamPreview');
-        const displayMenu = document.getElementById('displayMenu');
-        let displayCount = 0;
+        const displayButtons = document.getElementById('displayButtons');
+        let currentView = 'users';
+        let refreshInterval;
         let selectedDisplay = 0;
-        let previewRequestInProgress = false;
-        let fullscreenWindows = {};
-        function updatePreviewImage() {
-            const img = streamPreview.querySelector('img');
-            const newSrc = `/api/latest-preview?display=${selectedDisplay}&t=${new Date().getTime()}`;
-            console.log('Updating preview image with src:', newSrc);
-            img.src = newSrc;
-        }
+        let displayCount = 0;
 
-        function requestLatestPreview() {
-            if (!previewRequestInProgress && selectedDisplay !== null) {
-                console.log('Requesting latest preview for display:', selectedDisplay);
-                previewRequestInProgress = true;
-                socket.send(JSON.stringify({ type: 'requestLatestPreview', display: selectedDisplay }));
-            }
-        }
+        function initializeWebSocket() {
+            socket = new WebSocket('wss://' + window.location.host + '/admin?username=' + encodeURIComponent(username));
 
-        streamPreview.addEventListener('click', (event) => {
-            event.stopPropagation();
-            console.log('Stream preview clicked');
-            const rect = streamPreview.getBoundingClientRect();
-            const x = event.clientX - rect.left;
-            const y = event.clientY - rect.top;
-            toggleDisplayMenu(x, y);
-        });
+            socket.onopen = () => {
+                debug('WebSocket connected');
+                refreshData();
+                setRefreshInterval();
+            };
 
-        document.addEventListener('click', (event) => {
-            if (!streamPreview.contains(event.target)) {
-                displayMenu.style.display = 'none';
-            }
-        });
+            socket.onclose = () => {
+                debug('WebSocket disconnected. Attempting to reconnect...');
+                setTimeout(initializeWebSocket, 5000);
+            };
 
-        function toggleDisplayMenu(x, y) {
-            if (displayMenu.style.display === 'block') {
-                displayMenu.style.display = 'none';
-            } else {
-                displayMenu.style.display = 'block';
-                displayMenu.style.left = `${x}px`;
-                displayMenu.style.top = `${y}px`;
-                
-                if (displayCount === 0) {
-                    socket.send(JSON.stringify({ type: 'requestDisplayCount' }));
+            socket.onerror = (error) => {
+                debug('WebSocket error: ' + error.message);
+            };
+
+            socket.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    console.log('Received data:', data);
+                    if (data.type === 'sessionList') {
+                        updateSessionList(data.sessions);
+                    } else if (data.type === 'displayCount') {
+                        displayCount = data.count;
+                        console.log('Display count:', displayCount);
+                        createDisplayButtons(displayCount);
+                    } else if (data.type === 'frameAvailable') {
+                        if (data.display === selectedDisplay) {
+                            console.log('New frame available, updating preview');
+                            updatePreviewImage();
+                        }
+                    } else if (data.type === 'frame') {
+                        updatePreviewImage(data.data);
+                    } else if (data.type === 'forceLogout') {
+                        console.log('Received force logout signal');
+                        alert('Your session has been terminated. You will be logged out.');
+                        window.location.href = '/admin/login';
+                    } else if (data.type === 'error') {
+                        console.error('Error:', data.message);
+                        alert(data.message);
+                    }
+                } catch (error) {
+                    console.error('Error parsing message:', error);
                 }
+            };
+        }
+
+        initializeWebSocket();
+
+        function debug(message) {
+            console.log(message);
+            debugConsole.innerHTML += message + '<br>';
+            debugConsole.scrollTop = debugConsole.scrollHeight;
+        }
+
+        function refreshData() {
+            if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'requestSessionList' }));
             }
+        }
+
+        function setRefreshInterval() {
+            clearInterval(refreshInterval);
+            const interval = parseInt(reloadIntervalSelect.value) * 1000;
+            refreshInterval = setInterval(refreshData, interval);
+        }
+
+        reloadIntervalSelect.addEventListener('change', setRefreshInterval);
+        forceRefreshButton.addEventListener('click', refreshData);
+        
+        function updatePreviewImage(frameData) {
+            const img = streamPreview.querySelector('img');
+            if (frameData) {
+                img.src = 'data:image/jpeg;base64,' + frameData;
+            } else {
+                img.src = `/api/latest-frame?display=${selectedDisplay}&t=${new Date().getTime()}`;
+            }
+            img.style.display = 'block';
         }
 
         function createDisplayButtons(count) {
-            console.log('Creating display buttons, count:', count);
-            displayMenu.innerHTML = '';
+            displayButtons.innerHTML = '';
             for (let i = 0; i < count; i++) {
                 const button = document.createElement('button');
                 button.textContent = `Display ${i}`;
-                button.onclick = () => {
-                    selectDisplay(i);
-                    displayMenu.style.display = 'none';
-                };
-                displayMenu.appendChild(button);
+                button.onclick = () => selectDisplay(i);
+                displayButtons.appendChild(button);
             }
         }
 
         function selectDisplay(display) {
-            console.log('Selecting display:', display);
             selectedDisplay = display;
-            requestLatestPreview();
-            updatePreviewImage();
-            openFullscreen(display);
+            console.log('Selected display:', display);
+            if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'requestFrame', display: display }));
+            }
         }
 
-        function openFullscreen(display) {
-            const windowName = `FullscreenStream_${display}`;
-            
-            // Close the existing window if it's open
-            if (fullscreenWindows[display] && !fullscreenWindows[display].closed) {
-                fullscreenWindows[display].close();
+        function updateSessionList(sessions) {
+            sessionList.innerHTML = '';
+            if (currentView === 'users') {
+                Object.keys(sessions).forEach(username => {
+                    const folder = document.createElement('div');
+                    folder.className = 'folder';
+                    folder.textContent = `${username} (${sessions[username].length})`;
+                    folder.onclick = () => showUserSessions(username, sessions[username]);
+                    
+                    const terminateButton = document.createElement('button');
+                    terminateButton.textContent = 'Terminate All';
+                    terminateButton.onclick = (e) => {
+                        e.stopPropagation();
+                        terminateUserSessions(username);
+                    };
+                    folder.appendChild(terminateButton);
+                    
+                    sessionList.appendChild(folder);
+                });
             }
+        }
+
+        function showUserSessions(username, userSessions) {
+            currentView = 'sessions';
+            sessionList.innerHTML = '';
+            backButton.style.display = 'block';
             
-            // Open a new window
-            fullscreenWindows[display] = window.open(`/fullscreen?display=${display}`, windowName, 'width=800,height=600');
-            
-            // Add an event listener to remove the reference when the window is closed
-            fullscreenWindows[display].addEventListener('beforeunload', () => {
-                fullscreenWindows[display] = null;
+            userSessions.forEach(session => {
+                const li = document.createElement('li');
+                li.textContent = `${session.type} - ${session.id} `;
+                const terminateButton = document.createElement('button');
+                terminateButton.textContent = 'Terminate';
+                terminateButton.onclick = () => terminateSession(session.id);
+                li.appendChild(terminateButton);
+                sessionList.appendChild(li);
             });
         }
 
-        socket.onopen = function(event) {
-            console.log('WebSocket connection opened');
-            socket.send(JSON.stringify({ type: 'requestDisplayCount' }));
+        backButton.onclick = () => {
+            currentView = 'users';
+            backButton.style.display = 'none';
+            refreshData();
         };
 
-        socket.onmessage = function(event) {
-            try {
-                const data = JSON.parse(event.data);
-                console.log('Received data:', data);
-                if (data.type === 'displayCount') {
-                    displayCount = data.count;
-                    console.log('Display count:', displayCount);
-                    createDisplayButtons(displayCount);
-                } else if (data.type === 'previewAvailable') {
-                    if (data.display === selectedDisplay) {
-                        console.log('New preview available, updating image');
-                        updatePreviewImage();
-                        previewRequestInProgress = false;
-                    }
-                } else if (data.type === 'error') {
-                    console.error('Error:', data.message);
-                    alert(data.message);
-                    previewRequestInProgress = false;
-                }
-            } catch (error) {
-                console.error('Error parsing message:', error);
+        function terminateSession(sessionId) {
+            debug('Terminating session: ' + sessionId);
+            if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'terminateSession', sessionId }));
             }
-        };
+        }
 
-        socket.onerror = function(error) {
-            console.error('WebSocket error:', error);
-        };
+        function terminateUserSessions(username) {
+            debug('Terminating all sessions for user: ' + username);
+            if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'terminateUserSessions', username }));
+            }
+        }
 
-        socket.onclose = function(event) {
-            console.log('WebSocket connection closed');
-        };
-
-        // Request a new preview every 5 seconds
+        // Request a new frame every 3 seconds
         setInterval(() => {
-            if (selectedDisplay !== null) {
-                requestLatestPreview();
+            if (socket.readyState === WebSocket.OPEN) {
+                console.log('Requesting latest frame');
+                socket.send(JSON.stringify({ type: 'requestFrame', display: selectedDisplay }));
             }
-        }, 5000);
+        }, 3000);
+
+        // Initial request for display count
+        setTimeout(() => {
+            if (socket.readyState === WebSocket.OPEN) {
+                socket.send(JSON.stringify({ type: 'requestDisplayCount' }));
+            }
+        }, 1000);
+
     </script>
 </body>
 </html>

@@ -10,11 +10,16 @@
         "body-parser": "^1.20.2",
         "cookie-parser": "^1.4.6",
         "ejs": "^3.1.10",
-        "express": "^4.17.1",
+        "express": "^4.19.2",
         "express-session": "^1.18.0",
+        "fs": "^0.0.1-security",
+        "http": "^0.0.1-security",
+        "https": "^1.0.0",
         "memorystore": "^1.6.7",
+        "path": "^0.12.7",
         "selfsigned": "^2.4.1",
         "uuid": "^8.3.2",
-        "ws": "^8.2.3"
+        "ws": "^8.18.0",
+        "zlib": "^1.0.5"
     }
 }
