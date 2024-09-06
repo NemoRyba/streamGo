@@ -23,7 +23,7 @@ const httpsOptions = {
 };
 
 const server = https.createServer(httpsOptions, app);
-const wss = new WebSocket.Server({ noServer: true });
+const wss = new WebSocket.Server({ server });
 
 // Session store
 const sessionStore = new MemoryStore({
@@ -65,17 +65,17 @@ const HTTPS_PORT = 3000;
 const HTTP_PORT = 80; // Standard HTTP port
 
 const httpServer = http.createServer((req, res) => {
-    res.writeHead(301, { "Location": "https://" + req.headers['host'] + req.url });
-    res.end();
-  });
-  
-  // Middleware to redirect HTTP to HTTPS
-  app.use((req, res, next) => {
-    if (!req.secure) {
-      return res.redirect('https://' + req.headers.host + req.url);
-    }
-    next();
-  });
+  res.writeHead(301, { "Location": "https://" + req.headers['host'] + req.url });
+  res.end();
+});
+
+// Middleware to redirect HTTP to HTTPS
+app.use((req, res, next) => {
+  if (!req.secure) {
+    return res.redirect('https://' + req.headers.host + req.url);
+  }
+  next();
+});
 
 // Middleware to check if user is authenticated
 const isAuthenticated = (req, res, next) => {
@@ -90,7 +90,6 @@ app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).send('Something broke!');
 });
-
 // Routes
 app.get('/', (req, res) => {
   console.log('Root route accessed, redirecting to /login');
@@ -190,7 +189,7 @@ app.get('/api/latest-frame', (req, res) => {
     console.log('No frame available for display:', display);
     res.status(404).json({ message: 'No frame available' });
   }
-});
+}); 
 
 app.get('/api/latest-preview', (req, res) => {
   const display = parseInt(req.query.display) || 0;
@@ -226,266 +225,217 @@ app.get('/api/latest-preview', (req, res) => {
     res.status(202).json({ message: 'Preview requested, please try again shortly' });
   }
 });
+// WebSocket connection handler
+wss.on('connection', (ws, req) => {
+  const sessionId = uuidv4();
+  let sessionType = 'User';
+  let username = 'Unknown User';
 
-// WebSocket upgrade handling
-server.on('upgrade', (request, socket, head) => {
-    const socketId = `${socket.remoteAddress}:${socket.remotePort}`;
-    console.log(`Upgrade request received for socket ${socketId}`);
-  
-    const { pathname } = new URL(request.url, `https://${request.headers.host}`);
-    console.log(`Pathname: ${pathname}`);
-  
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      console.log(`Upgrading socket ${socketId} to WebSocket for path ${pathname}`);
-      wss.emit('connection', ws, request, pathname);
-    });
-  });
-  
-  // WebSocket connection handler
-  wss.on('connection', (ws, req, pathname) => {
-    const sessionId = uuidv4();
-    let sessionType = 'User';
-    let username = 'Unknown User';
-  
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    const params = new URLSearchParams(url.search);
-  
-    if (pathname === '/admin') {
-      sessionType = 'Admin';
-      username = params.get('username') || 'Unknown Admin';
-      adminSocket = ws;
-      sendSessionList();
-    } else if (pathname === '/ws') {
-      const clientType = params.get('clientType');
-      if (clientType === 'go') {
-        goClients.add(ws);
-        console.log('New Go client connected');
-        sessionType = 'GoClient';
-      } else {
-        sessionType = 'User';
-        username = params.get('username') || 'Unknown User';
-      }
-    } else if (pathname.startsWith('/direct/')) {
-      sessionType = 'Direct';
-      username = params.get('username') || 'Unknown Direct User';
-    }
-  
-    const session = { id: sessionId, type: sessionType, ws, selectedDisplay: null, username };
-    sessions.set(sessionId, session);
-  
-    console.log(`New ${sessionType} connection: ${sessionId} for user: ${username}`);
-  
-    ws.on('message', (message) => {
-      try {
-        const jsonMessage = JSON.parse(message);
-        console.log('Received message:', jsonMessage.type);
-        handleJSONMessage(ws, jsonMessage, sessionType);
-      } catch (e) {
-        console.error('Error parsing message:', e);
-      }
-    });
-  
-    ws.on('close', () => {
-      sessions.delete(sessionId);
-      console.log(`${sessionType} client disconnected: ${sessionId}`);
-      if (sessionType === 'Admin') {
-        adminSocket = null;
-      } else if (sessionType === 'GoClient') {
-        goClients.delete(ws);
-        console.log('Go client disconnected');
-      }
-      sendSessionList();
-    });
-  });
-  
-  function handleJSONMessage(ws, jsonMessage, sessionType) {
-    console.log('Handling JSON message:', jsonMessage.type, 'for session type:', sessionType);
-  
-    switch (jsonMessage.type) {
-      case 'goClient':
-        if (sessionType === 'GoClient') {
-          console.log('Go client identified');
-        }
-        break;
-      case 'requestDisplayCount':
-        sendToAvailableGoClient(jsonMessage);
-        break;
-      case 'displayCount':
-        broadcastToClients(jsonMessage);
-        break;
-      case 'requestFrame':
-        sendToAvailableGoClient(jsonMessage);
-        break;
-      case 'frame':
-        handleFrame(jsonMessage);
-        break;
-      case 'preview':
-        console.log(`Received preview for display ${jsonMessage.display}, size: ${jsonMessage.data.length} characters`);
-        latestPreviews.set(jsonMessage.display, jsonMessage.data);
-        notifyClientsOfNewPreview(jsonMessage.display);
-        break;
-      case 'terminateSession':
-        console.debug('Termination request received for session: ' + jsonMessage.sessionId);
-        terminateSession(jsonMessage.sessionId);
-        break;
-      case 'terminateUserSessions':
-        console.debug('Termination request received for user: ' + jsonMessage.username);
-        terminateUserSessions(jsonMessage.username);
-        break;
-      case 'requestSessionList':
-        sendSessionList();
-        break;
-      default:
-        console.log('Unknown message type:', jsonMessage.type);
-    }
-  }
-  
-  function handleFrame(frameMessage) {
-    const { display, userID, data, isPreview } = frameMessage;
-    if (isPreview) {
-      latestPreviews.set(display, data);
+  const url = new URL(req.url, `https://${req.headers.host}`);
+  const pathname = url.pathname;
+  const params = new URLSearchParams(url.search);
+
+  if (pathname === '/admin') {
+    sessionType = 'Admin';
+    username = params.get('username') || 'Unknown Admin';
+    adminSocket = ws;
+    sendSessionList();
+  } else if (pathname === '/ws') {
+    const clientType = params.get('clientType');
+    if (clientType === 'go') {
+      goClients.add(ws);
+      console.log('New Go client connected');
+      sessionType = 'GoClient';
+      sendDisplayCountRequest(ws);
     } else {
-      latestFrames.set(display, data);
+      sessionType = 'User';
+      username = params.get('username') || 'Unknown User';
     }
-    
-    // Send frame to the specific user
-    const userSession = Array.from(sessions.values()).find(s => s.username === userID);
-    if (userSession && userSession.ws.readyState === WebSocket.OPEN) {
-      userSession.ws.send(JSON.stringify(frameMessage));
+  } else if (pathname.startsWith('/direct/')) {
+    sessionType = 'Direct';
+    username = params.get('username') || 'Unknown Direct User';
+  }
+
+  const session = { id: sessionId, type: sessionType, ws, selectedDisplay: null, username };
+  sessions.set(sessionId, session);
+
+  console.log(`New ${sessionType} connection: ${sessionId} for user: ${username}`);
+
+  ws.on('message', (message) => {
+    try {
+      const jsonMessage = JSON.parse(message);
+      console.log('Received message:', jsonMessage.type);
+      
+      handleJSONMessage(ws, jsonMessage, sessionType, sessionId);
+    } catch (e) {
+      console.error('Error parsing message:', e);
     }
-  }
-  
-  function broadcastToClients(message) {
-    wss.clients.forEach((client) => {
-      if (!goClients.has(client) && client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify(message));
-      }
-    });
-  }
-  
-  function notifyClientsOfNewPreview(display) {
-    wss.clients.forEach((client) => {
-      if (!goClients.has(client) && client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type: 'previewAvailable', display }));
-      }
-    });
-  }
-  
-  function sendSessionList() {
-    if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
-      const groupedSessions = {};
-      Array.from(sessions.values()).forEach(({ id, type, username }) => {
-        if (!groupedSessions[username]) {
-          groupedSessions[username] = [];
-        }
-        groupedSessions[username].push({ id, type });
-      });
-      console.debug('Sending updated session list to admin');
-      adminSocket.send(JSON.stringify({ type: 'sessionList', sessions: groupedSessions }));
+  });
+
+  ws.on('close', () => {
+    if (sessionType === 'User') {
+      removeWatcher(sessionId);
     }
-  }
+    sessions.delete(sessionId);
+    console.log(`${sessionType} client disconnected: ${sessionId}`);
+    if (sessionType === 'Admin') {
+      adminSocket = null;
+    } else if (sessionType === 'GoClient') {
+      goClients.delete(ws);
+      console.log('Go client disconnected');
+    }
+    sendSessionList();
+  });
+});
+
+function handleJSONMessage(ws, jsonMessage, sessionType, sessionId) {
+  console.log('Handling JSON message:', jsonMessage.type, 'for session type:', sessionType);
   
-  function terminateSession(sessionId) {
-    console.debug('Attempting to terminate session: ' + sessionId);
-    const session = sessions.get(sessionId);
-    if (session) {
-      console.debug('Session found. Type: ' + session.type);
-      if (session.type === 'Admin') {
-        if (session.expressSessionId) {
-          sessionStore.destroy(session.expressSessionId, (err) => {
-            if (err) {
-              console.error('Error destroying express session:', err);
-            }
-          });
-        }
-      }
-      // Send logout message to the client
-      if (session.ws.readyState === WebSocket.OPEN) {
-        session.ws.send(JSON.stringify({ type: 'forceLogout' }));
-      }
-      session.ws.close();
-      sessions.delete(sessionId);
-      console.debug('Session terminated and removed: ' + sessionId);
+  switch (jsonMessage.type) {
+    case 'goClient':
+      console.log('Go client identified');
+      break;
+    case 'displayCount':
+      broadcastToClients(jsonMessage);
+      break;
+    case 'frame':
+      handleFrame(jsonMessage);
+      break;
+    case 'requestFrame':
+      requestFrameFromGoClient(jsonMessage.display, jsonMessage.isPreview, sessionId);
+      break;
+    case 'selectDisplay':
+      removeWatcher(sessionId);
+      addWatcher(sessionId, jsonMessage.display);
+      break;
+    case 'unselectDisplay':
+      removeWatcher(sessionId);
+      break;
+    case 'requestSessionList':
       sendSessionList();
-    } else {
-      console.debug('Session not found: ' + sessionId);
+      break;
+    case 'terminateSession':
+      terminateSession(jsonMessage.sessionId);
+      break;
+    case 'terminateUserSessions':
+      terminateUserSessions(jsonMessage.username);
+      break;
+    default:
+      console.log("Unknown message type:", jsonMessage.type);
+  }
+}
+
+function sendDisplayCountRequest(ws) {
+  ws.send(JSON.stringify({ type: 'requestDisplayCount' }));
+}
+
+function handleFrame(frameMessage) {
+  const { display, data } = frameMessage;
+  latestFrames.set(display, data);
+  notifyClientsOfNewFrame(display);
+}
+
+function notifyClientsOfNewFrame(display) {
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify({ type: 'frameAvailable', display }));
+    }
+  });
+}
+
+function broadcastToClients(message) {
+  wss.clients.forEach((client) => {
+    if (!goClients.has(client) && client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify(message));
+    }
+  });
+}
+
+function addWatcher(sessionId, display) {
+  const session = sessions.get(sessionId);
+  if (session) {
+    session.selectedDisplay = display;
+    requestFrameFromGoClient(display, false, sessionId);
+  }
+}
+
+function removeWatcher(sessionId) {
+  const session = sessions.get(sessionId);
+  if (session) {
+    session.selectedDisplay = null;
+  }
+}
+
+function requestFrameFromGoClient(display, isPreview, sessionId) {
+  for (let client of goClients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify({
+        type: 'requestFrame',
+        display,
+        isPreview,
+        userID: sessionId
+      }));
+      return;
     }
   }
-  
-  function terminateUserSessions(username) {
-    console.debug('Attempting to terminate all sessions for user: ' + username);
-    Array.from(sessions.values()).forEach((session) => {
-      if (session.username === username) {
-        terminateSession(session.id);
+  console.log('No available Go clients to handle the frame request');
+}
+
+function requestPreviewFromGoClient(display) {
+  for (let client of goClients) {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify({ type: 'requestPreview', display }));
+      return;
+    }
+  }
+  console.log('No available Go clients to handle the preview request');
+}
+
+function sendSessionList() {
+  if (adminSocket && adminSocket.readyState === WebSocket.OPEN) {
+    const groupedSessions = {};
+    Array.from(sessions.values()).forEach(({ id, type, username }) => {
+      if (!groupedSessions[username]) {
+        groupedSessions[username] = [];
       }
+      groupedSessions[username].push({ id, type });
     });
+    console.debug('Sending updated session list to admin');
+    adminSocket.send(JSON.stringify({ type: 'sessionList', sessions: groupedSessions }));
   }
-  
-  function sendToAvailableGoClient(message) {
-    for (let client of goClients) {
-      if (client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify(message));
-        return; // Send to the first available client
-      }
+}
+
+function terminateSession(sessionId) {
+  console.debug('Attempting to terminate session: ' + sessionId);
+  const session = sessions.get(sessionId);
+  if (session) {
+    if (session.ws.readyState === WebSocket.OPEN) {
+      session.ws.send(JSON.stringify({ type: 'forceLogout' }));
     }
-    console.log('No available Go clients to handle the request');
+    session.ws.close();
+    sessions.delete(sessionId);
+    console.debug('Session terminated and removed: ' + sessionId);
+    sendSessionList();
+  } else {
+    console.debug('Session not found: ' + sessionId);
   }
-  
-  function ensureGoClientConnected() {
-    if (goClients.size === 0) {
-      console.log('No Go clients connected. Waiting for connection...');
-      return new Promise((resolve) => {
-        const checkInterval = setInterval(() => {
-          if (goClients.size > 0) {
-            clearInterval(checkInterval);
-            console.log('Go client connected.');
-            resolve();
-          }
-        }, 1000); // Check every second
-      });
+}
+
+function terminateUserSessions(username) {
+  console.debug('Attempting to terminate all sessions for user: ' + username);
+  Array.from(sessions.values()).forEach((session) => {
+    if (session.username === username) {
+      terminateSession(session.id);
     }
-    return Promise.resolve();
-  }
-  
-  async function requestFrameFromGoClient(display, isPreview, userID) {
-    await ensureGoClientConnected();
-    sendToAvailableGoClient({
-      type: 'requestFrame',
-      display,
-      isPreview,
-      userID
-    });
-  }
-  
-  function requestPreviewFromGoClient(display) {
-    sendToAvailableGoClient({ type: 'requestPreview', display });
-  }
-  
-  // Error handling
-  wss.on('error', (error) => {
-    console.error('WebSocket server error:', error);
   });
-  
-  server.on('error', (error) => {
-    console.error('HTTPS server error:', error);
-  });
-  
-  process.on('unhandledRejection', (reason, promise) => {
-    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-  });
-  
-  process.on('uncaughtException', (error) => {
-    console.error('Uncaught Exception:', error);
-    process.exit(1);
-  });
-  
+}
 
-  server.listen(HTTPS_PORT, () => {
-    console.log(`Server is running on https://localhost:${HTTPS_PORT}`);
-    console.log('WARNING: Using a self-signed certificate. This should only be used for development.');
-  });
+server.listen(HTTPS_PORT, () => {
+  console.log(`HTTPS Server running on port ${HTTPS_PORT}`);
+});
 
+httpServer.listen(HTTP_PORT, () => {
+  console.log(`HTTP Server running on port ${HTTP_PORT} (redirecting to HTTPS)`);
+});
 
-  httpServer.listen(HTTP_PORT, () => {
-    console.log(`HTTP Server running on port ${HTTP_PORT} (redirecting to HTTPS)`);
-  });
+console.log('Server script executed. Check for errors above.');

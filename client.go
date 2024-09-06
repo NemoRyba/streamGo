@@ -2,300 +2,358 @@ package main
 
 import (
 	"bytes"
-	"compress/zlib"
-	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"image"
-	"image/draw"
+	"image/color"
 	"image/jpeg"
 	"log"
-	"net/url"
-	"os"
-	"os/signal"
+	"math"
+	"net/http"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/kbinani/screenshot"
-	"github.com/nfnt/resize"
+	"github.com/pion/mediadevices"
+	"github.com/pion/webrtc/v3"
+
+	// These are required to register the encoder and screen capture driver
+	_ "github.com/pion/mediadevices/pkg/codec/x264"
+	_ "github.com/pion/mediadevices/pkg/driver/screen"
 )
+
+type Config struct {
+	Quality int
+	FPS     int
+}
+
+type StreamType string
 
 const (
-	serverAddr        = "wss://localhost:3000/ws"
-	maxWidth          = 2400
-	previewWidth      = 1280
-	jpegQuality       = 80
-	reconnectInterval = 5 * time.Second
+	StreamTypeFrameByFrame StreamType = "frame-by-frame"
+	StreamTypeDiff         StreamType = "diff"
+	StreamTypeWebRTC       StreamType = "webrtc"
 )
+
+type Client struct {
+	conn           *websocket.Conn
+	config         Config
+	streaming      bool
+	stopChan       chan struct{}
+	mutex          sync.Mutex
+	lastFrame      *image.RGBA
+	lastFrameMux   sync.Mutex
+	diff           bool
+	clientID       string
+	streamType     StreamType
+	peerConnection *webrtc.PeerConnection
+	mediaStream    mediadevices.MediaStream
+}
 
 var (
-	captureBuffer        = &bytes.Buffer{}
-	compressBuffer       = &bytes.Buffer{}
-	displayMutex         sync.Mutex
-	userConnections      = make(map[string]*websocket.Conn)
-	userConnectionsMutex sync.Mutex
-	isConnected          bool
-	connectionMutex      sync.Mutex
+	clients    = make(map[string]*Client)
+	clientsMux sync.Mutex
 )
 
-type frameRequest struct {
-	display   int
-	userID    string
-	isPreview bool
-	respond   chan<- string
+func main() {
+	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		enableCors(&w)
+		handleConnection(w, r)
+	})
+	log.Println("Server starting on :8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-func captureAndEncodeFrame(display int, isPreview bool) (string, error) {
+func enableCors(w *http.ResponseWriter) {
+	(*w).Header().Set("Access-Control-Allow-Origin", "*")
+	(*w).Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	(*w).Header().Set("Access-Control-Allow-Headers", "Content-Type")
+}
+
+func handleConnection(w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("Upgrade error:", err)
+		return
+	}
+
+	clientID := r.URL.Query().Get("id")
+	log.Printf("New client connected: %s", clientID)
+
+	clientsMux.Lock()
+	if existingClient, exists := clients[clientID]; exists {
+		log.Printf("Closing existing connection for client %s", clientID)
+		existingClient.conn.Close()
+		delete(clients, clientID)
+	}
+	config := Config{Quality: 75, FPS: 10}
+	client := &Client{conn: conn, config: config, stopChan: make(chan struct{}), diff: false, clientID: clientID}
+	clients[clientID] = client
+	clientsMux.Unlock()
+
+	defer func() {
+		conn.Close()
+		clientsMux.Lock()
+		delete(clients, clientID)
+		clientsMux.Unlock()
+		log.Printf("Client disconnected: %s", clientID)
+	}()
+
+	for {
+		_, message, err := conn.ReadMessage()
+		if err != nil {
+			log.Printf("Read error for client %s: %v", clientID, err)
+			break
+		}
+
+		log.Printf("Received message from client %s: %s", clientID, string(message))
+
+		var request map[string]interface{}
+		if err := json.Unmarshal(message, &request); err != nil {
+			log.Printf("JSON error for client %s: %v", clientID, err)
+			continue
+		}
+
+		switch request["type"] {
+		case "frame":
+			display, ok := request["display"].(float64)
+			if !ok {
+				log.Printf("Invalid display value for frame request from client %s", clientID)
+				continue
+			}
+			sendFrame(clientID, int(display))
+		case "startStream":
+			display, ok := request["display"].(float64)
+			if !ok {
+				log.Printf("Invalid display value for stream request from client %s", clientID)
+				continue
+			}
+			client.mutex.Lock()
+			if !client.streaming {
+				client.streaming = true
+				client.stopChan = make(chan struct{})
+				go streamDisplay(clientID, int(display))
+				log.Printf("Started streaming for client %s", clientID)
+			}
+			client.mutex.Unlock()
+		case "stopStream":
+			client.mutex.Lock()
+			if client.streaming {
+				client.streaming = false
+				close(client.stopChan)
+				log.Printf("Stopping stream for client %s", clientID)
+			}
+			client.mutex.Unlock()
+		case "displayCount":
+			sendDisplayCount(conn)
+		case "toggleDiffOnly":
+			diffOnly, ok := request["value"].(bool)
+			if !ok {
+				log.Printf("Invalid diffOnly value from client %s", clientID)
+				continue
+			}
+			clients[clientID].diff = bool(diffOnly)
+			log.Printf("Set diffOnly to %t for client %s", diffOnly, clientID)
+		case "setQuality":
+			quality, ok := request["quality"].(float64)
+			if !ok {
+				log.Printf("Invalid quality value from client %s", clientID)
+				continue
+			}
+			client.config.Quality = int(quality)
+			log.Printf("Set quality to %d for client %s", client.config.Quality, clientID)
+		case "setFPS":
+			fps, ok := request["fps"].(float64)
+			if !ok {
+				log.Printf("Invalid FPS value from client %s", clientID)
+				continue
+			}
+			client.config.FPS = int(fps)
+			log.Printf("Set FPS to %d for client %s", client.config.FPS, clientID)
+		default:
+			log.Printf("Unknown message type from client %s: %v", clientID, request["type"])
+		}
+	}
+}
+
+func streamDisplay(clientID string, display int) {
+	clientsMux.Lock()
+	client, exists := clients[clientID]
+	clientsMux.Unlock()
+	if !exists {
+		log.Printf("Client %s not found for streaming", clientID)
+		return
+	}
+
+	ticker := time.NewTicker(time.Second / time.Duration(client.config.FPS))
+	defer ticker.Stop()
+
+	log.Printf("Starting stream loop for client %s", clientID)
+	for {
+		select {
+		case <-client.stopChan:
+			log.Printf("Received stop signal for client %s", clientID)
+			return
+		case <-ticker.C:
+			client.mutex.Lock()
+			if !client.streaming {
+				client.mutex.Unlock()
+				log.Printf("Streaming stopped for client %s", clientID)
+				return
+			}
+			client.mutex.Unlock()
+			if err := sendFrame(clientID, display); err != nil {
+				log.Printf("Error sending frame to client %s: %v", clientID, err)
+				return
+			}
+		}
+	}
+}
+
+func sendFrame(clientID string, display int) error {
+	clientsMux.Lock()
+	client, exists := clients[clientID]
+	clientsMux.Unlock()
+	if !exists {
+		log.Printf("Client %s not found for sending frame", clientID)
+		return nil
+	}
+
 	img, err := screenshot.CaptureDisplay(display)
 	if err != nil {
-		return "", err
+		log.Printf("Capture error: %v", err)
+		return client.conn.WriteJSON(map[string]interface{}{
+			"type":  "error",
+			"error": "Failed to capture display",
+		})
 	}
 
-	var resizedImg image.Image
-	if isPreview {
-		resizedImg = resize.Resize(previewWidth, 0, img, resize.Lanczos3)
-	} else if img.Bounds().Dx() > maxWidth {
-		resizedImg = resize.Resize(maxWidth, 0, img, resize.Lanczos3)
+	var diffImg *image.RGBA
+	var diff = clients[clientID].diff
+
+	/*if diff {
+		client.lastFrameMux.Lock()
+		if client.lastFrame != nil {
+			diffImg = getDiffImage(client.lastFrame, img)
+		}
+		client.lastFrame = img
+		client.lastFrameMux.Unlock()
+	}*/
+
+	var frameToSend *image.RGBA
+	if diff {
+		blurRadius := 1.5 // Adjust this value to control blur intensity
+		frameToSend = applyGaussianBlur(img, blurRadius)
 	} else {
-		resizedImg = img
+		frameToSend = img
 	}
 
-	var rgbaImg *image.RGBA
-	if rgba, ok := resizedImg.(*image.RGBA); ok {
-		rgbaImg = rgba
-	} else {
-		bounds := resizedImg.Bounds()
-		rgbaImg = image.NewRGBA(bounds)
-		draw.Draw(rgbaImg, bounds, resizedImg, bounds.Min, draw.Src)
+	buf := new(bytes.Buffer)
+	if err := jpeg.Encode(buf, frameToSend, &jpeg.Options{Quality: client.config.Quality}); err != nil {
+		return fmt.Errorf("JPEG encode error: %v", err)
 	}
 
-	captureBuffer.Reset()
-	if err := jpeg.Encode(captureBuffer, rgbaImg, &jpeg.Options{Quality: jpegQuality}); err != nil {
-		return "", err
-	}
+	data := buf.Bytes()
+	encoded := base64.StdEncoding.EncodeToString(data)
 
-	compressBuffer.Reset()
-	zw := zlib.NewWriter(compressBuffer)
-	if _, err := zw.Write(captureBuffer.Bytes()); err != nil {
-		return "", err
-	}
-	if err := zw.Close(); err != nil {
-		return "", err
-	}
-
-	return base64.StdEncoding.EncodeToString(compressBuffer.Bytes()), nil
-}
-
-func sendJSONMessage(conn *websocket.Conn, message interface{}) error {
-	return conn.WriteJSON(message)
-}
-
-func sendDisplayCount(conn *websocket.Conn) error {
-	displayCount := screenshot.NumActiveDisplays()
-	log.Printf("Sending display count: %d", displayCount)
-	return sendJSONMessage(conn, map[string]interface{}{
-		"type":  "displayCount",
-		"count": displayCount,
+	return client.conn.WriteJSON(map[string]interface{}{
+		"type":    "frame",
+		"display": display,
+		"data":    encoded,
+		"diff":    diff && diffImg != nil,
 	})
 }
 
-func runClient(done chan struct{}) {
-	u, err := url.Parse(serverAddr)
-	if err != nil {
-		log.Println("Failed to parse server address:", err)
-		return
-	}
+func applyGaussianBlur(img *image.RGBA, radius float64) *image.RGBA {
+	bounds := img.Bounds()
+	blurred := image.NewRGBA(bounds)
 
-	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true, // For testing only, remove in production
-	}
-	dialer := websocket.Dialer{
-		TLSClientConfig: tlsConfig,
-	}
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			var r, g, b, a float64
+			var sum float64
 
-	for {
-		connectionMutex.Lock()
-		if isConnected {
-			connectionMutex.Unlock()
-			time.Sleep(reconnectInterval)
-			continue
-		}
-		isConnected = true
-		connectionMutex.Unlock()
+			for ky := -int(radius); ky <= int(radius); ky++ {
+				for kx := -int(radius); kx <= int(radius); kx++ {
+					ix := x + kx
+					iy := y + ky
 
-		log.Println("Attempting to connect to server...")
-		conn, _, err := dialer.Dial(u.String(), nil)
-		if err != nil {
-			log.Println("Failed to connect to server:", err)
-			connectionMutex.Lock()
-			isConnected = false
-			connectionMutex.Unlock()
-			select {
-			case <-done:
-				return
-			case <-time.After(reconnectInterval):
-				continue
-			}
-		}
-
-		log.Println("Connected to server")
-
-		if err := sendJSONMessage(conn, map[string]string{"type": "goClient"}); err != nil {
-			log.Println("Failed to identify as Go client:", err)
-			conn.Close()
-			connectionMutex.Lock()
-			isConnected = false
-			connectionMutex.Unlock()
-			continue
-		}
-
-		log.Println("Identified as Go client")
-
-		if err := sendDisplayCount(conn); err != nil {
-			log.Println("Failed to send initial display count:", err)
-		}
-
-		frameRequests := make(chan frameRequest)
-		connClosed := make(chan struct{})
-
-		go handleServerMessages(conn, frameRequests, connClosed)
-		go handleFrameRequests(frameRequests, connClosed)
-
-		select {
-		case <-connClosed:
-			log.Println("Connection closed. Attempting to reconnect...")
-			connectionMutex.Lock()
-			isConnected = false
-			connectionMutex.Unlock()
-			time.Sleep(reconnectInterval)
-		case <-done:
-			log.Println("Received shutdown signal")
-			conn.Close()
-			return
-		}
-	}
-}
-
-func handleServerMessages(conn *websocket.Conn, frameRequests chan<- frameRequest, connClosed chan<- struct{}) {
-	defer close(connClosed)
-
-	for {
-		var msg map[string]interface{}
-		if err := conn.ReadJSON(&msg); err != nil {
-			log.Println("Read error:", err)
-			return
-		}
-
-		log.Printf("Received message: %+v", msg)
-
-		switch msg["type"].(string) {
-		case "requestDisplayCount":
-			if err := sendDisplayCount(conn); err != nil {
-				log.Println("Failed to send display count:", err)
-			}
-		case "requestFrame":
-			display := int(msg["display"].(float64))
-			userID := msg["userID"].(string)
-			isPreview := msg["isPreview"].(bool)
-			respChan := make(chan string)
-			frameRequests <- frameRequest{display: display, userID: userID, isPreview: isPreview, respond: respChan}
-			frameData := <-respChan
-			if frameData != "" {
-				if err := sendJSONMessage(conn, map[string]interface{}{
-					"type":    "frame",
-					"display": display,
-					"userID":  userID,
-					"data":    frameData,
-				}); err != nil {
-					log.Println("Failed to send frame:", err)
+					if ix >= bounds.Min.X && ix < bounds.Max.X && iy >= bounds.Min.Y && iy < bounds.Max.Y {
+						weight := gaussian(float64(kx), float64(ky), radius)
+						col := img.RGBAAt(ix, iy)
+						r += float64(col.R) * weight
+						g += float64(col.G) * weight
+						b += float64(col.B) * weight
+						a += float64(col.A) * weight
+						sum += weight
+					}
 				}
 			}
-		case "directConnect":
-			browserEndpoint := msg["browserEndpoint"].(string)
-			go handleDirectConnection(browserEndpoint)
-		default:
-			log.Printf("Unknown message type: %s", msg["type"])
+
+			blurred.Set(x, y, color.RGBA{
+				R: uint8(r / sum),
+				G: uint8(g / sum),
+				B: uint8(b / sum),
+				A: uint8(a / sum),
+			})
 		}
 	}
+
+	return blurred
 }
 
-func handleFrameRequests(frameRequests <-chan frameRequest, connClosed <-chan struct{}) {
-	for {
-		select {
-		case req := <-frameRequests:
-			frameData, err := captureAndEncodeFrame(req.display, req.isPreview)
-			if err != nil {
-				log.Printf("Failed to capture and encode frame for display %d: %v", req.display, err)
-				req.respond <- ""
-				continue
-			}
-
-			log.Printf("Captured frame for display %d, user %s, size: %d bytes", req.display, req.userID, len(frameData))
-			req.respond <- frameData
-		case <-connClosed:
-			return
-		}
-	}
+func gaussian(x, y, sigma float64) float64 {
+	return math.Exp(-(x*x + y*y) / (2 * sigma * sigma))
 }
 
-func handleDirectConnection(browserEndpoint string) {
-	u, err := url.Parse(browserEndpoint)
-	if err != nil {
-		log.Println("Failed to parse browser endpoint:", err)
-		return
-	}
+func getDiffImage(prev, curr *image.RGBA) *image.RGBA {
+	bounds := prev.Bounds()
+	diff := image.NewRGBA(bounds)
+	threshold := uint32(10) // Adjust this value to change sensitivity
+	//	changedPixels := 0
+	//	totalPixels := bounds.Dx() * bounds.Dy()
 
-	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
-	if err != nil {
-		log.Println("Failed to connect to browser:", err)
-		return
-	}
-	defer conn.Close()
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			r1, g1, b1, _ := prev.At(x, y).RGBA()
+			r2, g2, b2, _ := curr.At(x, y).RGBA()
 
-	log.Println("Connected directly to browser")
-
-	for {
-		var msg map[string]interface{}
-		if err := conn.ReadJSON(&msg); err != nil {
-			log.Println("Read error from browser:", err)
-			return
-		}
-
-		switch msg["type"].(string) {
-		case "requestFrame":
-			display := int(msg["display"].(float64))
-			isPreview := msg["isPreview"].(bool)
-			frameData, err := captureAndEncodeFrame(display, isPreview)
-			if err != nil {
-				log.Printf("Failed to capture frame for browser: %v", err)
-				continue
+			if abs(int64(r1)-int64(r2)) > int64(threshold) ||
+				abs(int64(g1)-int64(g2)) > int64(threshold) ||
+				abs(int64(b1)-int64(b2)) > int64(threshold) {
+				// Changed pixel: set it to the new color
+				diff.Set(x, y, color.RGBA{uint8(r2 >> 8), uint8(g2 >> 8), uint8(b2 >> 8), 255})
+			} else {
+				// Unchanged pixel: set it to transparent
+				diff.Set(x, y, color.RGBA{0, 0, 0, 0})
 			}
-			if err := sendJSONMessage(conn, map[string]interface{}{
-				"type":    "frame",
-				"display": display,
-				"data":    frameData,
-			}); err != nil {
-				log.Println("Failed to send frame to browser:", err)
-			}
-		default:
-			log.Printf("Unknown message type from browser: %s", msg["type"])
 		}
 	}
+
+	//	changePercentage := float64(changedPixels) / float64(totalPixels) * 100
+	//	log.Printf("Diff image: %d/%d pixels changed (%.2f%%)", changedPixels, totalPixels, changePercentage)
+
+	return diff
 }
 
-func main() {
-	done := make(chan struct{})
-	go runClient(done)
+func abs(x int64) int64 {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	sig := <-sigChan
-	log.Printf("Received signal: %v. Initiating shutdown...", sig)
-
-	close(done)
-
-	time.Sleep(2 * time.Second)
-	log.Println("Client shut down gracefully")
+func sendDisplayCount(conn *websocket.Conn) {
+	count := screenshot.NumActiveDisplays()
+	conn.WriteJSON(map[string]interface{}{
+		"type":  "displayCount",
+		"count": count,
+	})
 }
