@@ -7,6 +7,33 @@
             "request": "launch",
             "command": "npm start",
             "cwd": "${workspaceFolder}"
+        },     
+        {
+            "name": "Debug Go Program",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${workspaceFolder}",
+            "env": {},
+            "args": []
+        },
+        {
+            "name": "Debug Current File",
+            "type": "go",
+            "request": "launch",
+            "mode": "debug",
+            "program": "${file}",
+            "env": {},
+            "args": []
+        },
+        {
+            "name": "Debug Go Tests",
+            "type": "go",
+            "request": "launch",
+            "mode": "test",
+            "program": "${workspaceFolder}",
+            "env": {},
+            "args": []
         }
     ]
 }
